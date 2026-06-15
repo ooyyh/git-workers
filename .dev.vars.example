@@ -1,0 +1,31 @@
+# Copy to .dev.vars and fill in. .dev.vars is gitignored.
+# Used by `wrangler dev`. For deployed Workers, use:
+#   wrangler secret put STORAGE_ACCESS_KEY_ID
+#   wrangler secret put STORAGE_SECRET_KEY
+#   wrangler secret put AUTH_TOKEN
+
+# ---- Storage backend selection ----
+# "s3"  -> S3-compatible (AWS S3, R2 S3 API, Backblaze B2, MinIO, ...).
+# "webdav" -> WebDAV.
+STORAGE_TYPE="s3"
+
+# Prefix within the bucket / WebDAV root that holds all git repos.
+# A repo named "myrepo" lives at <STORAGE_PREFIX>/myrepo/...
+STORAGE_PREFIX="git"
+
+# ---- S3-compatible ----
+STORAGE_ENDPOINT="https://s3.us-east-1.amazonaws.com"
+STORAGE_REGION="us-east-1"
+STORAGE_BUCKET="my-bucket"
+STORAGE_ACCESS_KEY_ID="AKIA..."
+STORAGE_SECRET_KEY="..."
+
+# ---- WebDAV ----
+STORAGE_ENDPOINT="https://dav.example.com"
+STORAGE_USERNAME="user"
+STORAGE_PASSWORD="pass"
+
+# ---- Auth ----
+# Bearer token required for all requests. Empty = no auth (NOT for production).
+# Generate one: node -e "console.log(require('crypto').randomBytes(24).toString('hex'))"
+AUTH_TOKEN=""

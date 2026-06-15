@@ -1,0 +1,13 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "git-workers",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-04-04",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "vars": {
+    "STORAGE_TYPE": "memory",
+    "STORAGE_PREFIX": "",
+    "AUTH_TOKEN": ""
+  }
+}

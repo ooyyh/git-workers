@@ -1,0 +1,25 @@
+{
+  "name": "git-workers",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A Git smart-HTTP server running on Cloudflare Workers with pluggable S3-compatible / WebDAV object storage backends.",
+  "license": "ISC",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typegen": "wrangler types",
+    "typecheck": "wrangler types && tsc --noEmit",
+    "test": "echo 'tests: see README manual smoke test with a real git client' && exit 0"
+  },
+  "dependencies": {
+    "pako": "^2.1.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250615.0",
+    "@types/pako": "^2.0.3",
+    "typescript": "^5.7.0",
+    "wrangler": "^4.20.0"
+  }
+}
