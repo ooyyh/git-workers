@@ -106,6 +106,7 @@ export interface RepoHomeData {
   branches: RawRef[];
   tags: RawRef[];
   defaultBranch: string | null;
+  defaultShort: string | null;
   head: ResolvedRev | null;
   entries: TreeEntry[];
   readmeHtml: string | null;
@@ -119,6 +120,8 @@ async function gatherRepoHome(repo: Repo, refs: RefStore): Promise<RepoHomeData>
   const head = await refs.readHead();
   const defaultBranch = head.symref ?? null;
   const defaultRef = defaultBranch ?? branches[0]?.name ?? null;
+  // short branch name for URLs (e.g. "main" not "refs/heads/main")
+  const defaultShort = defaultBranch ? defaultBranch.replace(/^refs\/heads\//, "") : branches[0]?.name.replace(/^refs\/heads\//, "") ?? null;
 
   let headRev: ResolvedRev | null = null;
   let entries: TreeEntry[] = [];
@@ -143,7 +146,7 @@ async function gatherRepoHome(repo: Repo, refs: RefStore): Promise<RepoHomeData>
     }
   }
 
-  return { refs: allRefs, branches, tags, defaultBranch, head: headRev, entries, readmeHtml };
+  return { refs: allRefs, branches, tags, defaultBranch, defaultShort, head: headRev, entries, readmeHtml };
 }
 
 /** Render a repo's home page. */
@@ -156,7 +159,7 @@ export async function renderRepoHome(ctx: UiContext, repoName: string, repo: Rep
     ? data.entries
         .map((e) => {
           const mode = e.isDir ? "drwxr-xr-x" : isImage(e.name) ? "img" : "-rw-r--r--";
-          const href = `${ctx.baseUrl}/${escapePathSeg(repoName)}/tree/${escapePathSeg(data.defaultBranch || "HEAD")}/${e.isDir ? pathJoin("", e.name) : escapePathSeg(e.name)}`;
+          const href = `${ctx.baseUrl}/${escapePathSeg(repoName)}/tree/${escapePathSeg(data.defaultShort || "HEAD")}/${e.isDir ? pathJoin("", e.name) : escapePathSeg(e.name)}`;
           return `<tr><td class="mode">${mode}</td><td class="nm"><a href="${href}">${escapeHtml(e.name)}${e.isDir ? "/" : ""}</a></td><td class="sz"></td></tr>`;
         })
         .join("")

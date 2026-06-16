@@ -56,17 +56,17 @@ export function renderLoginPage(baseUrl: string, error: boolean, lang: "zh" | "e
 <html lang="${L}"><head><meta charset="utf-8"><title>${title}</title>
 <style>
 *{box-sizing:border-box}
-body{margin:0;background:#000;color:#c8f0c8;font-family:"JetBrains Mono",ui-monospace,Consolas,monospace;display:flex;align-items:center;justify-content:center;min-height:100vh}
-.box{border:1px solid #1f3a1f;padding:28px;width:360px;max-width:90vw}
-.hd{color:#33ff66;font-weight:700;margin-bottom:4px}
-.hd .c{color:#ffb000;animation:bl 1.1s steps(2) infinite}
+body{margin:0;background:#000;color:#dadada;font-family:"JetBrains Mono",ui-monospace,Consolas,monospace;display:flex;align-items:center;justify-content:center;min-height:100vh}
+.box{border:1px solid #2a2a2a;padding:28px;width:360px;max-width:90vw}
+.hd{color:#fff;font-weight:700;margin-bottom:4px}
+.hd .c{color:#707070;animation:bl 1.1s steps(2) infinite}
 @keyframes bl{50%{opacity:0}}
-.sub{color:#5a8a5a;font-size:12px;margin-bottom:18px}
-input{width:100%;padding:9px 10px;background:#000;border:1px solid #1f3a1f;color:#c8f0c8;font-family:inherit;font-size:13px;margin-bottom:12px}
-input:focus{outline:none;border-color:#33ff66}
-button{width:100%;padding:9px;background:transparent;border:1px solid #22c43a;color:#33ff66;font-family:inherit;font-size:13px;cursor:pointer}
-button:hover{background:#33ff66;color:#000}
-.error{border:1px solid #ff3344;background:#1a0000;color:#ff3344;padding:8px 10px;font-size:12px;margin-bottom:12px}
+.sub{color:#707070;font-size:12px;margin-bottom:18px}
+input{width:100%;padding:9px 10px;background:#000;border:1px solid #2a2a2a;color:#dadada;font-family:inherit;font-size:13px;margin-bottom:12px}
+input:focus{outline:none;border-color:#888}
+button{width:100%;padding:9px;background:transparent;border:1px solid #666;color:#ccc;font-family:inherit;font-size:13px;cursor:pointer}
+button:hover{background:#e8e8e8;color:#000}
+.error{border:1px solid #666;background:#1a1a1a;color:#ccc;padding:8px 10px;font-size:12px;margin-bottom:12px}
 </style></head><body>
 <form class="box" method="POST" action="${baseUrl}/login">
   <div class="hd">git-workers<span class="c">_</span></div>

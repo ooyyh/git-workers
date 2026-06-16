@@ -153,7 +153,7 @@ export default {
         await requireUiAuth(request, env);
         const store = await resolveBackend(env, repoName);
         if (!store) return notFound("repository not registered");
-        const rev = treeMatch[2];
+        const rev = decodeURIComponent(treeMatch[2]);
         const pathParts = treeMatch[3] ? treeMatch[3].split("/").map(decodeURIComponent).filter(Boolean) : [];
         const ctx = await uiContext(request, env, url);
         const repo = new Repo(repoName, store);
@@ -175,7 +175,7 @@ export default {
         requireGitAuth(request, env);
         const store = await resolveBackend(env, repoName);
         if (!store) return notFound("repository not registered");
-        const rev = rawMatch[2];
+        const rev = decodeURIComponent(rawMatch[2]);
         const pathParts = rawMatch[3] ? rawMatch[3].split("/").map(decodeURIComponent).filter(Boolean) : [];
         const repo = new Repo(repoName, store);
         const refs = new RefStore(repoName, store);
