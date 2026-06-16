@@ -70,6 +70,7 @@ export async function handleAdmin(request: Request, env: Env): Promise<Response>
   if (path === "/storages" && request.method === "GET") return html(await renderStoragesPage(env, lang));
   if (path === "/storages" && request.method === "POST") return createStorageHandler(request, env, lang);
   if (path === "/storages/test" && request.method === "POST") return testConnectionHandler(request);
+  if (path === "/diag" && request.method === "GET") return diagHandler(env, url);
   const sEdit = path.match(/^\/storages\/(\d+)\/edit$/) && request.method === "POST";
   if (sEdit) return updateStorageHandler(request, env, parseInt(RegExp.$1, 10));
   const sDel = path.match(/^\/storages\/(\d+)\/delete$/) && request.method === "POST";
@@ -338,6 +339,40 @@ async function testConnectionHandler(request: Request): Promise<Response> {
     return json({ ok: true, message: `connected · ${entries.length} entries`, ms: Date.now() - t0 });
   } catch (e) {
     return json({ ok: false, message: errMsg(e), ms: Date.now() - t0 });
+  }
+}
+
+/** Diagnostic GET against the first storage, exposing SigV4 signature details.
+ *  Use: GET /admin/diag?key=<key>[&range=start-end] */
+async function diagHandler(env: Env, url: URL): Promise<Response> {
+  const key = url.searchParams.get("key") || "diag-test";
+  const rangeParam = url.searchParams.get("range");
+  let range: { start: number; end: number } | undefined;
+  if (rangeParam) {
+    const [s, e] = rangeParam.split("-").map((x) => parseInt(x, 10));
+    if (!Number.isNaN(s) && !Number.isNaN(e)) range = { start: s, end: e };
+  }
+  const storages = await listStorages(env.DB, env.CONFIG_KEY);
+  if (!storages.length) return json({ error: "no storages" });
+  const s = storages[0];
+  const { createBackendFromSpec } = await import("./storage");
+  const backend = createBackendFromSpec({
+    kind: s.kind,
+    endpoint: s.config.endpoint ?? "",
+    region: s.config.region,
+    bucket: s.config.bucket,
+    basePath: s.config.basePath,
+    accessKeyId: s.creds.accessKeyId,
+    secretAccessKey: s.creds.secretAccessKey,
+    username: s.creds.username,
+    password: s.creds.password,
+  });
+  if (!("diagGet" in backend)) return json({ error: "backend has no diagGet" });
+  try {
+    const r = await (backend as any).diagGet(key, range);
+    return json(r);
+  } catch (e) {
+    return json({ error: errMsg(e) });
   }
 }
 

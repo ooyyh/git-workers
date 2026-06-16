@@ -161,16 +161,53 @@ export class S3Backend implements StorageBackend {
     };
   }
 
+  /** Diagnostic GET: returns signature details + raw response, for debugging
+   * SignatureDoesNotMatch against a specific store. Used by /admin/diag.
+   *  ?range=start-end adds a Range header (to test ranged GET signing). */
+  async diagGet(key: string, range?: { start: number; end: number }): Promise<{
+    method: string;
+    url: string;
+    host: string;
+    signedHeaders: string;
+    status: number;
+    bodyLen: number;
+    body: string;
+  }> {
+    const path = this.bucketPath(key);
+    const host = new URL(this.cfg.endpoint).host;
+    const headers: Record<string, string> = {};
+    if (range) headers.Range = `bytes=${range.start}-${range.end}`;
+    const signed = await this.sign({ method: "GET", path, headers });
+    const url = this.buildUrl(path);
+    const res = await fetch(url, { method: "GET", headers: signed });
+    const buf = await res.arrayBuffer().catch(() => new ArrayBuffer(0));
+    const body = new TextDecoder().decode(new Uint8Array(buf).subarray(0, 200));
+    return {
+      method: "GET",
+      url,
+      host,
+      signedHeaders: Object.keys(signed).join(",") + " | Range=" + (headers.Range || "(none)"),
+      status: res.status,
+      bodyLen: buf.byteLength,
+      body,
+    };
+  }
+
   async get(key: string, range?: ByteRange): Promise<ReadableStream<Uint8Array> | null> {
     const path = this.bucketPath(key);
-    const headers: Record<string, string> = {};
+    // Range is intentionally NOT signed: some S3-compatible stores (notably
+    // Backblaze B2) fail ranged GETs with SignatureDoesNotMatch when Range is
+    // in the SigV4 canonical headers. AWS S4 allows the Range header to be sent
+    // unsigned; the server still honors it for the byte range. We send it only
+    // in the actual fetch headers.
+    const signed = await this.sign({ method: "GET", path });
+    const fetchHeaders: Record<string, string> = { ...signed };
     if (range) {
-      headers.Range = range.endExclusive
+      fetchHeaders.Range = range.endExclusive
         ? `bytes=${range.start}-${range.endExclusive - 1}`
         : `bytes=${range.start}-`;
     }
-    const signed = await this.sign({ method: "GET", path, headers });
-    const res = await fetch(this.buildUrl(path), { method: "GET", headers: signed });
+    const res = await fetch(this.buildUrl(path), { method: "GET", headers: fetchHeaders });
     if (res.status === 404) return null;
     if (!res.ok && res.status !== 206) {
       const text = await res.text().catch(() => "");
