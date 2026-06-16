@@ -18,18 +18,29 @@ export function escapePathSeg(s: string): string {
 }
 
 const CSS = `
-:root{
+:root[data-theme="dark"]{
   --bg:#000; --bg2:#0a0a0a; --bg3:#161616; --line:#2a2a2a; --line2:#1e1e1e;
-  --grn:#e0e0e0; --grn2:#888; --amb:#d0d0d0; --amb2:#666; --red:#999;
   --txt:#dadada; --dim:#707070; --dim2:#505050;
+  --link:#c8c8c8; --link-hover:#fff; --accent:#fff;
+  --btn-border:#666; --btn-text:#ccc; --btn-hover-bg:#e8e8e8; --btn-hover-text:#000;
+  --term-bg:#000; --blob-color:#ccc;
+}
+:root[data-theme="light"]{
+  --bg:#f7f7f7; --bg2:#ffffff; --bg3:#efefef; --line:#dcdcdc; --line2:#e6e6e6;
+  --txt:#2a2a2a; --dim:#888; --dim2:#aaa;
+  --link:#444; --link-hover:#000; --accent:#000;
+  --btn-border:#999; --btn-text:#333; --btn-hover-bg:#333; --btn-hover-text:#fff;
+  --term-bg:#fff; --blob-color:#2a2a2a;
+}
+:root{
   --mono:"JetBrains Mono","Fira Code",ui-monospace,SFMono-Regular,Consolas,"Courier New",monospace;
 }
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--txt);font-family:var(--mono);font-size:13px;line-height:1.5}
-a{color:#c8c8c8;text-decoration:none;border-bottom:1px dotted #555}
-a:hover{color:#fff;text-decoration:none;border-bottom-color:#fff}
+body{margin:0;background:var(--bg);color:var(--txt);font-family:var(--mono);font-size:13px;line-height:1.5;display:flex;flex-direction:column;min-height:100vh}
+a{color:var(--link);text-decoration:none;border-bottom:1px dotted var(--dim)}
+a:hover{color:var(--link-hover);text-decoration:none;border-bottom-color:var(--link-hover)}
 code,pre,.mono{font-family:var(--mono)}
-.wrap{max-width:1080px;margin:0 auto;padding:0 18px}
+.wrap{max-width:1080px;margin:0 auto;padding:0 18px;width:100%}
 /* header */
 header.bar{background:var(--bg2);border-bottom:1px solid var(--line);padding:0}
 header.bar .row{display:flex;align-items:center;gap:0;height:36px}
@@ -139,11 +150,13 @@ export interface LayoutOpts {
   authTokenConfigured: boolean;
   isAdmin?: boolean;
   lang?: "zh" | "en";
+  theme?: "dark" | "light";
   bodyInner: string;
 }
 
 export function renderPage(opts: LayoutOpts): string {
   const lang = opts.lang ?? "zh";
+  const theme = opts.theme ?? "dark";
   const isZh = lang === "zh";
   const reposLabel = isZh ? "~/仓库" : "~/repos";
   const loginLabel = isZh ? "登录" : "login";
@@ -159,10 +172,13 @@ export function renderPage(opts: LayoutOpts): string {
   // language toggle: link to /setlang?l=<other> which sets cookie + redirects back
   const otherLang = isZh ? "en" : "zh";
   const langToggle = `<a class="langtoggle" href="/setlang?l=${otherLang}&to=${encodeURIComponent("/")}">${isZh ? "EN" : "中"}</a>`;
+  // theme toggle (☾ dark → ☀ light)
+  const otherTheme = theme === "dark" ? "light" : "dark";
+  const themeToggle = `<a class="langtoggle" href="/settheme?t=${otherTheme}&to=${encodeURIComponent("/")}" title="${isZh ? "切换主题" : "toggle theme"}">${theme === "dark" ? "☾" : "☀"}</a>`;
   const adminLink = opts.isAdmin ? `<a href="/admin">${adminLabel}</a>` : "";
   const repoLink = opts.currentRepo ? `<a href="${opts.baseUrl}/${encodeURIComponent(opts.currentRepo)}">${escapeHtml(opts.currentRepo)}</a>` : "";
   return `<!doctype html>
-<html lang="${lang}">
+<html lang="${lang}" data-theme="${theme}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -180,13 +196,14 @@ export function renderPage(opts: LayoutOpts): string {
         ${adminLink}
       </nav>
       <div class="sp"></div>
+      ${themeToggle}
       ${langToggle}
       ${who}
       ${logoutLink}
     </div>
   </div>
 </header>
-<main class="wrap" style="padding-top:20px">
+<main class="wrap" style="padding-top:20px;flex:1">
 ${opts.bodyInner}
 </main>
 <footer class="bar"><div class="wrap">

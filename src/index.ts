@@ -34,7 +34,7 @@ import { buildReceiveInfoRefsResponse, handleReceivePack } from "./git/receive-p
 import { renderPage } from "./ui/layout";
 import { renderDashboard, renderRepoHome, renderTreePath, serveRaw, UiContext } from "./ui/pages";
 import { sessionForToken, setSessionCookie, clearSessionCookie, isUiAuthed, renderLoginPage } from "./ui/auth";
-import { detectLang } from "./ui/i18n";
+import { detectLang, detectTheme } from "./ui/i18n";
 import { handleAdmin, ADMIN_COOKIE } from "./admin";
 
 export { Repo };
@@ -62,6 +62,13 @@ export default {
       return new Response(redirect(to), { status: 302, headers: { Location: to, "Set-Cookie": `gw_lang=${l}; Path=/; Max-Age=31536000; SameSite=Lax` } });
     }
 
+    // ---- Theme toggle: sets gw_theme cookie, redirects back ----
+    if (path === "/settheme") {
+      const t = url.searchParams.get("t") === "light" ? "light" : "dark";
+      const to = url.searchParams.get("to") || "/";
+      return new Response(redirect(to), { status: 302, headers: { Location: to, "Set-Cookie": `gw_theme=${t}; Path=/; Max-Age=31536000; SameSite=Lax` } });
+    }
+
     // ---- Top-level UI routes ----
     if (path === "/" || path === "") {
       return guard(request, env, async () => {
@@ -69,7 +76,7 @@ export default {
         if (hasDb(env)) await initDb(env.DB);
         const ctx = await uiContext(request, env, url);
         const body = await renderDashboard(ctx);
-        return html(renderPage({ title: ctx.lang === "zh" ? "仓库 · git-workers" : "Repositories · git-workers", baseUrl, isAuthenticated: ctx.isAuthed, authTokenConfigured: ctx.hasToken, isAdmin: isAdminAuthed(request, env), lang: ctx.lang, bodyInner: body }));
+        return html(renderPage({ title: ctx.lang === "zh" ? "仓库 · git-workers" : "Repositories · git-workers", baseUrl, isAuthenticated: ctx.isAuthed, authTokenConfigured: ctx.hasToken, isAdmin: isAdminAuthed(request, env), lang: ctx.lang, theme: ctx.theme, bodyInner: body }));
       });
     }
 
@@ -164,7 +171,7 @@ export default {
         } catch (e) {
           body = `<div class="error">${escapeHtmlForUi(errMsg(e))}</div>`;
         }
-        return html(renderPage({ title: `${repoName} · git-workers`, currentRepo: repoName, baseUrl, isAuthenticated: ctx.isAuthed, authTokenConfigured: ctx.hasToken, isAdmin: isAdminAuthed(request, env), lang: ctx.lang, bodyInner: body }));
+        return html(renderPage({ title: `${repoName} · git-workers`, currentRepo: repoName, baseUrl, isAuthenticated: ctx.isAuthed, authTokenConfigured: ctx.hasToken, isAdmin: isAdminAuthed(request, env), lang: ctx.lang, theme: ctx.theme, bodyInner: body }));
       });
     }
 
@@ -201,7 +208,7 @@ export default {
         } catch (e) {
           body = `<div class="error">${escapeHtmlForUi(errMsg(e))}</div>`;
         }
-        return html(renderPage({ title: `${repoName} · git-workers`, currentRepo: repoName, baseUrl, isAuthenticated: ctx.isAuthed, authTokenConfigured: ctx.hasToken, isAdmin: isAdminAuthed(request, env), lang: ctx.lang, bodyInner: body }));
+        return html(renderPage({ title: `${repoName} · git-workers`, currentRepo: repoName, baseUrl, isAuthenticated: ctx.isAuthed, authTokenConfigured: ctx.hasToken, isAdmin: isAdminAuthed(request, env), lang: ctx.lang, theme: ctx.theme, bodyInner: body }));
       });
     }
 
@@ -255,6 +262,7 @@ async function uiContext(request: Request, env: Env, url: URL): Promise<UiContex
     isAuthed: isUiAuthed(request, expected),
     hasToken: !!env.AUTH_TOKEN,
     lang: detectLang(request.headers.get("Cookie")),
+    theme: detectTheme(request.headers.get("Cookie")),
     hasDb: hasDb(env),
     db: env.DB,
   };

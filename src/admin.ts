@@ -20,7 +20,7 @@ import { Env, createBackendFromSpec } from "./storage";
 import { initDb, listStorages, createStorage, updateStorage, deleteStorage, listRepos, createRepo, deleteRepo } from "./db";
 import { hasConfigKey } from "./db/crypto";
 import { renderPage, escapeHtml } from "./ui/layout";
-import { detectLang, t, tf, Lang } from "./ui/i18n";
+import { detectLang, t, tf, Lang, detectTheme, Theme } from "./ui/i18n";
 
 export const ADMIN_COOKIE = "gw_admin";
 
@@ -50,6 +50,7 @@ export async function handleAdmin(request: Request, env: Env): Promise<Response>
   const url = new URL(request.url);
   const path = url.pathname.replace(/^\/admin/, "") || "/";
   const lang: Lang = detectLang(request.headers.get("Cookie"));
+  const theme: Theme = detectTheme(request.headers.get("Cookie"));
 
   // login/logout are public
   if (path === "/login") {
@@ -66,8 +67,8 @@ export async function handleAdmin(request: Request, env: Env): Promise<Response>
     return new Response("Unauthorized\n", { status: 401 });
   }
 
-  if (path === "/" && request.method === "GET") return html(await renderAdminDashboard(env, lang));
-  if (path === "/storages" && request.method === "GET") return html(await renderStoragesPage(env, lang));
+  if (path === "/" && request.method === "GET") return html(await renderAdminDashboard(env, lang, theme));
+  if (path === "/storages" && request.method === "GET") return html(await renderStoragesPage(env, lang, theme));
   if (path === "/storages" && request.method === "POST") return createStorageHandler(request, env, lang);
   if (path === "/storages/test" && request.method === "POST") return testConnectionHandler(request);
   if (path === "/diag" && request.method === "GET") return diagHandler(env, url);
@@ -76,7 +77,7 @@ export async function handleAdmin(request: Request, env: Env): Promise<Response>
   const sDel = path.match(/^\/storages\/(\d+)\/delete$/) && request.method === "POST";
   if (sDel) return deleteStorageHandler(env, parseInt(RegExp.$1, 10), lang);
 
-  if (path === "/repos" && request.method === "GET") return html(await renderReposPage(env, lang));
+  if (path === "/repos" && request.method === "GET") return html(await renderReposPage(env, lang, theme));
   if (path === "/repos" && request.method === "POST") return createRepoHandler(request, env, lang);
   const rDel = path.match(/^\/repos\/(\d+)\/delete$/) && request.method === "POST";
   if (rDel) return deleteRepoHandler(env, parseInt(RegExp.$1, 10));
@@ -99,11 +100,11 @@ async function handleAdminLogin(request: Request, env: Env): Promise<Response> {
 // Pages
 // ---------------------------------------------------------------------------
 
-function adminShell(title: string, bodyInner: string, lang: Lang = "zh"): string {
-  return renderPage({ title: `${title} · admin`, baseUrl: "", isAuthenticated: true, authTokenConfigured: true, isAdmin: true, lang, bodyInner });
+function adminShell(title: string, bodyInner: string, lang: Lang = "zh", theme: Theme = "dark"): string {
+  return renderPage({ title: `${title} · admin`, baseUrl: "", isAuthenticated: true, authTokenConfigured: true, isAdmin: true, lang, theme, bodyInner });
 }
 
-async function renderAdminDashboard(env: Env, L: Lang): Promise<string> {
+async function renderAdminDashboard(env: Env, L: Lang, Th: Theme): Promise<string> {
   const storages = await listStorages(env.DB, env.CONFIG_KEY);
   const repos = await listRepos(env.DB);
   const encOk = hasConfigKey(env.CONFIG_KEY);
@@ -124,10 +125,11 @@ async function renderAdminDashboard(env: Env, L: Lang): Promise<string> {
     </div></div>
   `,
     L,
+    Th,
   );
 }
 
-async function renderStoragesPage(env: Env, L: Lang): Promise<string> {
+async function renderStoragesPage(env: Env, L: Lang, Th: Theme): Promise<string> {
   const storages = await listStorages(env.DB, env.CONFIG_KEY);
   const rows = storages.length
     ? `<table class="ls"><thead><tr><th>${t(L, "admin.col.name")}</th><th>${t(L, "admin.col.kind")}</th><th>${t(L, "admin.f.endpoint")}</th><th>${t(L, "admin.col.bucket")}</th><th></th></tr></thead><tbody>` +
@@ -204,10 +206,11 @@ async function renderStoragesPage(env: Env, L: Lang): Promise<string> {
     </div></div>
   `,
     L,
+    Th,
   );
 }
 
-async function renderReposPage(env: Env, L: Lang): Promise<string> {
+async function renderReposPage(env: Env, L: Lang, Th: Theme): Promise<string> {
   const repos = await listRepos(env.DB);
   const storages = await listStorages(env.DB, env.CONFIG_KEY);
   const storageOptions = storages.map((s) => `<option value="${s.id}">${escapeHtml(s.name)} (${escapeHtml(s.kind)})</option>`).join("");
@@ -251,6 +254,7 @@ async function renderReposPage(env: Env, L: Lang): Promise<string> {
     ${addForm}
   `,
     L,
+    Th,
   );
 }
 

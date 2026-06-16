@@ -26,6 +26,14 @@ export function langCookieValue(lang: Lang): string {
   return `${LANG_COOKIE}=${lang}; Path=/; Max-Age=31536000; SameSite=Lax`;
 }
 
+export type Theme = "dark" | "light";
+export const THEME_COOKIE = "gw_theme";
+
+export function detectTheme(cookieHeader: string | null): Theme {
+  const c = getCookie(cookieHeader, THEME_COOKIE);
+  return c === "light" ? "light" : "dark";
+}
+
 /** Lookup a key; falls back to the key itself if missing (so gaps are visible). */
 export function t(lang: Lang, key: string): string {
   const entry = DICT[key];

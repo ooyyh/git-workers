@@ -10,7 +10,7 @@ import { resolveRev, readTreeEntries, walkPath, parseActor, ResolvedRev } from "
 import { TreeEntry } from "../git/object";
 import { escapeHtml, escapePathSeg } from "./layout";
 import { renderMarkdown } from "./markdown";
-import { t, tf, Lang } from "./i18n";
+import { t, tf, Lang, Theme } from "./i18n";
 
 export interface UiContext {
   baseUrl: string;
@@ -20,6 +20,7 @@ export interface UiContext {
   isAuthed: boolean;
   hasToken: boolean;
   lang: Lang;
+  theme: Theme;
   /** D1 binding present (admin/DB mode). */
   hasDb?: boolean;
   /** Optional D1 (DB mode only) for listing registered repos. */
