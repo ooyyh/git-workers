@@ -43,11 +43,15 @@ git/myrepo/packed-refs           (optional)
 
 This mirrors a bare repository, so objects are content-addressed by SHA-1 as `objects/<sha[0..2]>/<sha[2..]>`.
 
-## Setup
+## Two operating modes
 
-### 1. Configure storage
+**ENV mode** (simplest — no database): configure one storage backend via environment variables. Repos are auto-discovered in storage. No admin panel.
 
-Copy `.dev.vars.example` → `.dev.vars` (gitignored) and fill in:
+**DB mode** (multi-backend + web admin panel): bind a Cloudflare D1 database. The admin panel at `/admin` lets you add multiple storage backends, assign each repo to a backend, and rotate credentials — all from the browser, without redeploying. Credentials are AES-GCM encrypted in D1.
+
+## Setup — ENV mode
+
+Configure storage via `.dev.vars` (local) or `wrangler secret put` (deployed). **Do not enable the `DB` D1 binding** in `wrangler.jsonc` for this mode.
 
 ```bash
 STORAGE_TYPE="s3"               # or "webdav"
@@ -104,16 +108,51 @@ git push -u origin main
 git clone https://<your-worker>.workers.dev/myrepo
 ```
 
+## Admin panel (DB mode)
+
+For multi-backend management from the browser:
+
+1. Create a D1 database and an encryption key:
+   ```bash
+   wrangler d1 create git-workers       # paste the database_id into wrangler.jsonc
+   # 32-byte AES key (hex) — used to encrypt storage credentials at rest in D1:
+   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+   wrangler secret put CONFIG_KEY        # paste the hex key
+   wrangler secret put ADMIN_PASSWORD    # admin panel login password
+   wrangler d1 migrations apply git-workers --remote   # (or --local)
+   ```
+
+2. Deploy. Open `https://<worker>/admin` and log in with `ADMIN_PASSWORD`.
+
+3. In the panel:
+   - **Storages** → add backends (S3 / WebDAV), each with its endpoint + credentials (encrypted in D1).
+   - **Repos** → register each repo and assign it a storage backend + visibility.
+
+4. A repo must be **registered** before `git push`/`clone` in DB mode; unregistered repos return 404. Deleting a repo only removes the assignment — objects remain in storage.
+
+> Set `CONFIG_KEY`. Without it, credentials fall back to plaintext in D1 (the admin UI warns when this is the case).
+
 ## Architecture
 
 ```
 src/
-  index.ts                 Worker entry: routing, auth, repo resolution
+  index.ts                 Worker entry: routing, auth, repo/backend resolution
+  admin.ts                 admin panel: login + storages/repos CRUD (DB mode)
+  db/
+    index.ts               D1 queries (storages + repos), encrypt on write
+    crypto.ts              AES-GCM credential encryption (CONFIG_KEY)
   storage/
     types.ts               StorageBackend interface (get[range] / put[CAS] / list / head / delete)
     s3.ts                  S3-compatible backend (SigV4 + Range + conditional writes)
     webdav.ts              WebDAV backend (PROPFIND/PUT/GET[range]/conditional writes)
-    index.ts               Backend factory from env vars
+    memory.ts              in-memory backend (tests / ephemeral demos)
+    index.ts               backend factory + per-repo resolution (DB) / env fallback
+  ui/
+    layout.ts              page shell + geek/terminal CSS
+    pages.ts               dashboard, repo home, tree/blob browse, raw
+    markdown.ts            README renderer
+    auth.ts                UI session auth (cookie)
+    repos.ts               repo discovery (env mode)
   git/
     crypto.ts              sha1/sha256, zlib inflate/deflate (Web Streams), hashing
     pktline.ts             pkt-line framing (encode + parse)

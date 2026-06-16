@@ -8,6 +8,17 @@
   "vars": {
     "STORAGE_TYPE": "memory",
     "STORAGE_PREFIX": "",
-    "AUTH_TOKEN": ""
-  }
+    "AUTH_TOKEN": "",
+    "ADMIN_PASSWORD": ""
+  },
+
+  "//d1": "Optional. Add a D1 binding to enable the admin panel + multi-backend mode. Create with: wrangler d1 create git-workers, then fill in database_id.",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "git-workers",
+      "database_id": "REPLACE_WITH_d1_create_output",
+      "migrations_dir": "./migrations"
+    }
+  ]
 }

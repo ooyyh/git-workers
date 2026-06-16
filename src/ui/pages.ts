@@ -18,56 +18,82 @@ export interface UiContext {
   workerOrigin: string;
   isAuthed: boolean;
   hasToken: boolean;
+  /** D1 binding present (admin/DB mode). */
+  hasDb?: boolean;
+  /** Optional D1 (DB mode only) for listing registered repos. */
+  db?: any;
 }
 
 /** Dashboard: list all repos + backend status + clone instructions. */
 export async function renderDashboard(ctx: UiContext): Promise<string> {
-  const repos = await listRepos(ctx.store, ctx.prefix);
-  const repoHtml = repos.length
-    ? repos
-        .map((r) => {
-          return `<a class="repo-item" href="${ctx.baseUrl}/${escapePathSeg(r.name)}">
-            <div>
-              <div class="name">${escapeHtml(r.name)}</div>
-              <div class="desc">${r.hasHead ? "git repository" : "incomplete (no HEAD)"}</div>
-            </div>
-            <span class="badge">${escapeHtml(ctx.workerOrigin.replace(/^https?:\/\//, "").split("/")[0])}</span>
-          </a>`;
-        })
-        .join("")
-    : `<div class="empty">
-        <p>No repositories yet.</p>
-        <p style="margin-top:8px">Create one by pushing from git — see below.</p>
-      </div>`;
+  // DB mode: list registered repos from D1. Env mode: scan storage for dirs.
+  let repoRows = "";
+  let count = 0;
+  if (ctx.hasDb && ctx.db) {
+    const { listRepos } = await import("../db");
+    const repos = await listRepos(ctx.db);
+    count = repos.length;
+    repoRows = repos.length
+      ? `<table class="ls"><thead><tr><th>repo</th><th>storage</th><th>vis</th><th>updated</th></tr></thead><tbody>` +
+        repos
+          .map(
+            (r: any) =>
+              `<tr><td class="nm"><a href="${ctx.baseUrl}/${escapePathSeg(r.name)}">${escapeHtml(r.name)}</a></td>` +
+              `<td class="meta">${escapeHtml(r.storageName ?? "-")}</td>` +
+              `<td>${r.visibility === "public" ? '<span class="tag pub">pub</span>' : '<span class="tag priv">priv</span>'}</td>` +
+              `<td class="meta">${escapeHtml(r.updatedAt ?? "")}</td></tr>`,
+          )
+          .join("") +
+        `</tbody></table>`
+      : `<div class="empty">[ no repos registered — add one in <a href="/admin">/admin</a> ]</div>`;
+  } else {
+    const repos = await listRepos(ctx.store, ctx.prefix);
+    count = repos.length;
+    repoRows = repos.length
+      ? `<table class="ls"><thead><tr><th>repo</th><th>status</th></tr></thead><tbody>` +
+        repos
+          .map(
+            (r) =>
+              `<tr><td class="nm"><a href="${ctx.baseUrl}/${escapePathSeg(r.name)}">${escapeHtml(r.name)}</a></td>` +
+              `<td>${r.hasHead ? '<span class="tag ok">ok</span>' : '<span class="tag warn">no HEAD</span>'}</td></tr>`,
+          )
+          .join("") +
+        `</tbody></table>`
+      : `<div class="empty">[ no repositories found ]</div>`;
+  }
 
-  const cloneExample = ctx.hasToken
-    ? `git clone ${ctx.workerOrigin}/myrepo`
-    : `git clone ${ctx.workerOrigin}/myrepo`;
-
+  const cloneCmd = `git clone ${ctx.workerOrigin}/myrepo`;
   const authNote = ctx.hasToken
-    ? `<div class="notice">This server requires a token. Configure git:<br><code>git config --global http.${ctx.workerOrigin}/.extraheader "Authorization: Bearer &lt;your-token&gt;"</code></div>`
-    : `<div class="notice">No auth token is configured (AUTH_TOKEN empty). Anyone with the URL can read/push.</div>`;
+    ? `<div class="notice">Auth token required. Configure git:<br><code>git config --global http.${ctx.workerOrigin}/.extraheader "Authorization: Bearer &lt;your-token&gt;"</code></div>`
+    : `<div class="notice">No AUTH_TOKEN set — anyone with the URL can read/push.</div>`;
+
+  const dbNote = ctx.hasDb
+    ? `<div class="box"><div class="hd">storage / repos <span class="rt"><a href="/admin">[ admin ]</a></span></div><div class="bd">${repoRows}</div></div>`
+    : `<div class="box"><div class="hd">repos <span class="rt">${count} found · ${escapeHtml(ctx.store?.kind ?? "?")} backend</span></div><div class="bd">${repoRows}</div></div>`;
+
+  const pushHints = ctx.hasDb
+    ? `<div class="box"><div class="hd">create a repo</div><div class="bd">
+         <p class="muted">In DB mode, register the repo first in <a href="/admin">/admin → repos</a>, assigning it a storage backend. Then:</p>
+         <div class="term" style="margin-top:8px"><div class="ln"><span class="p">$</span> <span class="cmd">git remote add origin <code>${escapeHtml(ctx.workerOrigin)}/myrepo</code></span></div>
+         <div class="ln"><span class="p">$</span> <span class="cmd">git push -u origin main</span></div></div>
+       </div></div>`
+    : `<div class="box"><div class="hd">create a repo</div><div class="bd">
+         <div class="term"><div class="ln"><span class="p">$</span> <span class="cmd">git init myrepo && cd myrepo</span></div>
+         <div class="ln"><span class="p">$</span> <span class="cmd">git remote add origin <code>${escapeHtml(ctx.workerOrigin)}/myrepo</code></span></div>
+         <div class="ln"><span class="p">$</span> <span class="cmd">git push -u origin main</span></div></div>
+         <p class="muted" style="margin-top:8px">A repo is created automatically on first push.</p>
+       </div></div>`;
+
+  const cloneBox = `<div class="term"><button class="cp" type="button">[copy]</button><div class="ln"><span class="p">$</span> <span class="cmd"><code>${escapeHtml(cloneCmd)}</code></span></div></div>`;
 
   return `
-    <h1>Repositories</h1>
-    <div class="subtitle">${repos.length} repos on <span class="mono">${escapeHtml(ctx.store.kind)}</span> backend${ctx.isAuthed ? "" : ""}</div>
+    <h1>repositories</h1>
+    <div class="sub">${count} repo${count === 1 ? "" : "s"} · ${ctx.hasDb ? "DB mode" : escapeHtml(ctx.store?.kind ?? "?") + " backend"}</div>
     ${authNote}
-    <div style="margin: 18px 0 24px">${repoHtml}</div>
-
-    <h2>Create a new repository</h2>
+    ${dbNote}
     <div class="grid2">
-      <div class="card">
-        <div style="margin-bottom:8px;color:var(--text-dim);font-size:13px">Push from an existing git repo:</div>
-        <div class="clone-box"><code>git init myrepo && cd myrepo</code></div>
-        <div class="clone-box" style="margin-top:8px"><code>git remote add origin ${escapeHtml(ctx.workerOrigin)}/myrepo</code></div>
-        <div class="clone-box" style="margin-top:8px"><code>git push -u origin main</code></div>
-        <div style="margin-top:10px;color:var(--text-dim);font-size:12px">A repo is created automatically on first push.</div>
-      </div>
-      <div class="card">
-        <div style="margin-bottom:8px;color:var(--text-dim);font-size:13px">Then clone it anywhere:</div>
-        <div class="clone-box"><code>${escapeHtml(cloneExample)}</code><button class="copy" type="button">copy</button></div>
-        <div style="margin-top:14px;color:var(--text-dim);font-size:12px">The repo then appears in the list above and is browsable in the UI.</div>
-      </div>
+      ${pushHints}
+      <div class="box"><div class="hd">clone anywhere</div><div class="bd">${cloneBox}<p class="muted" style="margin-top:10px">Then browse it in the UI.</p></div></div>
     </div>
   `;
 }
@@ -122,19 +148,16 @@ export async function renderRepoHome(ctx: UiContext, repoName: string, repo: Rep
   const data = await gatherRepoHome(repo, refs);
   const cloneUrl = `${ctx.workerOrigin}/${repoName}`;
 
-  // File table
+  // File table — ls-style
   const fileRows = data.entries.length
     ? data.entries
         .map((e) => {
-          const icon = e.isDir ? "📁" : isImage(e.name) ? "🖼" : "📄";
+          const mode = e.isDir ? "drwxr-xr-x" : isImage(e.name) ? "img" : "-rw-r--r--";
           const href = `${ctx.baseUrl}/${escapePathSeg(repoName)}/tree/${escapePathSeg(data.defaultBranch || "HEAD")}/${e.isDir ? pathJoin("", e.name) : escapePathSeg(e.name)}`;
-          return `<tr>
-            <td class="icon">${icon}</td>
-            <td><a href="${href}">${escapeHtml(e.name)}${e.isDir ? "/" : ""}</a></td>
-          </tr>`;
+          return `<tr><td class="mode">${mode}</td><td class="nm"><a href="${href}">${escapeHtml(e.name)}${e.isDir ? "/" : ""}</a></td><td class="sz"></td></tr>`;
         })
         .join("")
-    : `<tr><td colspan="2" style="color:var(--text-dim);text-align:center;padding:24px">Empty tree</td></tr>`;
+    : `<tr><td colspan="3" class="empty">empty tree</td></tr>`;
 
   const branchOptions = data.branches
     .map((b) => {
@@ -145,43 +168,24 @@ export async function renderRepoHome(ctx: UiContext, repoName: string, repo: Rep
     .join("");
 
   const headLine = data.head
-    ? `<span class="mono" style="color:var(--green)">${escapeHtml(data.head.commit.parents.length ? "" : "●")} ${escapeHtml(firstLine(data.head.message))}</span>
-       <div style="color:var(--text-dim);font-size:12px;margin-top:4px">${escapeHtml(parseActor(data.head.authorLine).name)} · ${escapeHtml(parseActor(data.head.authorLine).time)} · <a href="#" class="commit-hash">${data.head.sha.slice(0, 7)}</a></div>`
-    : `<span style="color:var(--text-dim)">No commits yet</span>`;
+    ? `<span class="who">${escapeHtml(parseActor(data.head.authorLine).name)}</span> · ${escapeHtml(firstLine(data.head.message))} · <span class="sha">${data.head.sha.slice(0, 7)}</span>`
+    : `<span class="muted">no commits yet</span>`;
 
   const readmeSection = data.readmeHtml
-    ? `<div class="card" style="padding:0;overflow:hidden">
-         <div style="padding:8px 16px;background:var(--bg-hover);font-size:13px;color:var(--text-dim);border-bottom:1px solid var(--border)">README</div>
-         <div style="padding:18px 22px">${data.readmeHtml}</div>
-       </div>`
+    ? `<div class="box"><div class="hd">README</div><div class="bd readme">${data.readmeHtml}</div></div>`
     : "";
-
-  const tabs = `<div class="tabs">
-    <a class="active" href="#">Code</a>
-    <a href="#">Commits <span class="badge">${data.refs.length}</span></a>
-  </div>`;
 
   return `
     <h1>${escapeHtml(repoName)}</h1>
-    <div class="subtitle">${data.branches.length} branches · ${data.tags.length} tags</div>
+    <div class="sub">${data.branches.length} branches · ${data.tags.length} tags</div>
 
-    <div class="card" style="margin-bottom:20px">
-      <div style="color:var(--text-dim);font-size:12px;margin-bottom:6px">Clone</div>
-      <div class="clone-box"><code>${escapeHtml(cloneUrl)}</code><button class="copy" type="button">copy</button></div>
-    </div>
+    <div class="term" style="margin-bottom:14px"><button class="cp" type="button">[copy]</button><div class="ln"><span class="p">$</span> <span class="cmd"><code>${escapeHtml(cloneUrl)}</code></span></div></div>
 
-    ${tabs}
-
-    <div class="card">
-      <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap">
-        <select class="branch-switch" onchange="var b=this.value;if(b)location.href='${ctx.baseUrl}/${escapePathSeg(repoName)}/tree/'+encodeURIComponent(b)">
-          ${branchOptions || "<option>HEAD</option>"}
-        </select>
-        <div style="flex:1">${headLine}</div>
+    <div class="box">
+      <div class="hd">${data.branches.length ? `<select class="branchsel" onchange="var b=this.value;if(b)location.href='${ctx.baseUrl}/${escapePathSeg(repoName)}/tree/'+encodeURIComponent(b)">${branchOptions}</select>` : "tree"} <span class="rt">${escapeHtml(headLine)}</span></div>
+      <div class="bd" style="padding:0">
+        <table class="ls"><tbody>${fileRows}</tbody></table>
       </div>
-      <table class="files">
-        ${fileRows}
-      </table>
     </div>
 
     ${readmeSection}
@@ -207,33 +211,30 @@ export async function renderTreePath(
     return `<div class="error">Path <code>${escapeHtml(pathParts.join("/"))}</code> does not exist in this tree.</div>`;
   }
 
-  // Breadcrumb
-  const crumb = [`<a href="${ctx.baseUrl}/${escapePathSeg(repoName)}">${escapeHtml(repoName)}</a>`];
-  let acc = "";
-  for (let i = 0; i < pathParts.length; i++) {
-    acc += (i === 0 ? "" : "/") + pathParts[i];
-    crumb.push(`<a href="${ctx.baseUrl}/${escapePathSeg(repoName)}/tree/${escapePathSeg(rev)}/${escapePathSeg(acc)}">${escapeHtml(pathParts[i])}</a>`);
-  }
-  const breadcrumb = `<div class="tree-path">${crumb.join(" / ")}</div>`;
+    const crumbParts = [`<a href="${ctx.baseUrl}/${escapePathSeg(repoName)}">${escapeHtml(repoName)}</a>`];
+    let acc = "";
+    for (let i = 0; i < pathParts.length; i++) {
+      acc += (i === 0 ? "" : "/") + pathParts[i];
+      crumbParts.push(`<a href="${ctx.baseUrl}/${escapePathSeg(repoName)}/tree/${escapePathSeg(rev)}/${escapePathSeg(acc)}">${escapeHtml(pathParts[i])}</a>`);
+    }
+    const breadcrumb = `<div class="crumb">${crumbParts.join(' <span class="sep">/</span> ')}</div>`;
 
   if (walk.type === "tree") {
     const entries = await readTreeEntries(repo, walk.sha);
     // Always show ".." to go up (unless at root)
     const upHtml = pathParts.length
-      ? `<tr><td class="icon">📁</td><td><a href="${ctx.baseUrl}/${escapePathSeg(repoName)}/tree/${escapePathSeg(rev)}/${escapePathSeg(pathParts.slice(0, -1).join("/"))}">..</a></td></tr>`
+      ? `<tr><td class="mode">drwxr-xr-x</td><td class="nm"><a href="${ctx.baseUrl}/${escapePathSeg(repoName)}/tree/${escapePathSeg(rev)}/${escapePathSeg(pathParts.slice(0, -1).join("/"))}">..</a></td><td class="sz"></td></tr>`
       : "";
     const rows = entries
       .map((e) => {
-        const icon = e.isDir ? "📁" : isImage(e.name) ? "🖼" : "📄";
+        const mode = e.isDir ? "drwxr-xr-x" : isImage(e.name) ? "img" : "-rw-r--r--";
         const childPath = pathParts.concat(e.name).join("/");
-        return `<tr><td class="icon">${icon}</td><td><a href="${ctx.baseUrl}/${escapePathSeg(repoName)}/tree/${escapePathSeg(rev)}/${escapePathSeg(childPath)}">${escapeHtml(e.name)}${e.isDir ? "/" : ""}</a></td></tr>`;
+        return `<tr><td class="mode">${mode}</td><td class="nm"><a href="${ctx.baseUrl}/${escapePathSeg(repoName)}/tree/${escapePathSeg(rev)}/${escapePathSeg(childPath)}">${escapeHtml(e.name)}${e.isDir ? "/" : ""}</a></td><td class="sz"></td></tr>`;
       })
       .join("");
     return `
       ${breadcrumb}
-      <div class="card">
-        <table class="files">${upHtml}${rows}</table>
-      </div>
+      <div class="box"><div class="bd" style="padding:0"><table class="ls"><tbody>${upHtml}${rows}</tbody></table></div></div>
     `;
   }
 
@@ -247,17 +248,14 @@ export async function renderTreePath(
   let body: string;
   if (isImg) {
     const mime = imageMime(walk.name);
-    body = `<img src="data:${mime};base64,${base64(obj.content)}" alt="${escapeHtml(walk.name)}" style="max-width:100%;border-radius:6px">`;
+    body = `<img src="data:${mime};base64,${base64(obj.content)}" alt="${escapeHtml(walk.name)}" style="max-width:100%;border:1px solid var(--line)">`;
   } else {
-    body = `<pre class="blob-view">${escapeHtml(text)}</pre>`;
+    body = `<pre class="blob">${escapeHtml(text)}</pre>`;
   }
 
   return `
     ${breadcrumb}
-    <div style="margin-bottom:12px;display:flex;gap:8px;align-items:center">
-      <span class="mono" style="color:var(--text-dim);font-size:12px">${formatBytes(obj.content.length)} · ${escapeHtml(walk.mode)}</span>
-      <a class="btn" href="${rawHref}">Raw</a>
-    </div>
+    <div class="bar-meta"><span class="sha">${escapeHtml(walk.mode)}</span><span>${formatBytes(obj.content.length)}</span><a class="btn subtle" href="${rawHref}">[raw]</a></div>
     ${body}
   `;
 }

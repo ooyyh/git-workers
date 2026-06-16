@@ -47,22 +47,28 @@ export function isUiAuthed(request: Request, expected: string | null): boolean {
 
 /** Render the login page (POST form posts the token, sets the cookie). */
 export function renderLoginPage(baseUrl: string, error: boolean): string {
-  const errHtml = error ? `<div class="error">Incorrect token. Try again.</div>` : "";
+  const errHtml = error ? `<div class="error">[ERR] incorrect token</div>` : "";
   return `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Log in · git-workers</title>
+<html lang="en"><head><meta charset="utf-8"><title>login · git-workers</title>
 <style>
-body{margin:0;background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh}
-.box{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:32px;width:340px;max-width:90vw}
-h1{font-size:18px;margin:0 0 4px} .sub{color:#8b949e;font-size:13px;margin-bottom:20px}
-input{width:100%;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#e6edf3;font-size:14px;margin-bottom:12px;font-family:inherit}
-input:focus{outline:none;border-color:#2f81f7}
-button{width:100%;padding:10px;background:#2f81f7;border:none;border-radius:6px;color:#fff;font-size:14px;font-weight:600;cursor:pointer}
+*{box-sizing:border-box}
+body{margin:0;background:#000;color:#c8f0c8;font-family:"JetBrains Mono",ui-monospace,Consolas,monospace;display:flex;align-items:center;justify-content:center;min-height:100vh}
+.box{border:1px solid #1f3a1f;padding:28px;width:360px;max-width:90vw}
+.hd{color:#33ff66;font-weight:700;margin-bottom:4px}
+.hd .c{color:#ffb000;animation:bl 1.1s steps(2) infinite}
+@keyframes bl{50%{opacity:0}}
+.sub{color:#5a8a5a;font-size:12px;margin-bottom:18px}
+input{width:100%;padding:9px 10px;background:#000;border:1px solid #1f3a1f;color:#c8f0c8;font-family:inherit;font-size:13px;margin-bottom:12px}
+input:focus{outline:none;border-color:#33ff66}
+button{width:100%;padding:9px;background:transparent;border:1px solid #22c43a;color:#33ff66;font-family:inherit;font-size:13px;cursor:pointer}
+button:hover{background:#33ff66;color:#000}
+.error{border:1px solid #ff3344;background:#1a0000;color:#ff3344;padding:8px 10px;font-size:12px;margin-bottom:12px}
 </style></head><body>
 <form class="box" method="POST" action="${baseUrl}/login">
-  <h1>git-workers</h1>
-  <div class="sub">Enter the server token to browse repositories.</div>
+  <div class="hd">git-workers<span class="c">_</span></div>
+  <div class="sub">authenticate to browse repositories</div>
   ${errHtml}
-  <input type="password" name="token" placeholder="Token" autofocus>
-  <button type="submit">Log in</button>
+  <input type="password" name="token" placeholder="token" autofocus>
+  <button type="submit">[ login ]</button>
 </form></body></html>`;
 }

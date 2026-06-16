@@ -1,10 +1,17 @@
 /**
- * git-workers: a Git smart-HTTP server + Web UI on Cloudflare Workers,
- * backed by a pluggable object-storage backend (S3-compatible or WebDAV).
+ * git-workers: a Git smart-HTTP server + Web UI + admin panel on Cloudflare
+ * Workers, backed by pluggable object-storage (S3-compatible / WebDAV).
+ *
+ * Two modes:
+ *   - ENV mode (no DB binding): one backend from env vars; repos auto-discovered
+ *     in storage. Simplest; no admin panel.
+ *   - DB mode (D1 binding): admin panel manages multiple storage backends +
+ *     repo↔storage assignments. Credentials AES-GCM encrypted in D1.
  *
  * Routes:
  *   GET  /                                     dashboard (repo list)
  *   GET  /login · POST /login · /logout        UI session auth
+ *   /admin*                                    admin panel (DB mode; ADMIN_PASSWORD)
  *   GET  /<repo>/info/refs?service=...         git smart-http advertisement
  *   POST /<repo>/git-upload-pack               git clone/fetch
  *   POST /<repo>/git-receive-pack              git push
@@ -12,15 +19,14 @@
  *   GET  /<repo>/tree/<rev>/<path...>          browse tree/blob (UI)
  *   GET  /<repo>/raw/<rev>/<path...>           raw file download
  *
- * A repo named "foo" lives under <STORAGE_PREFIX>/foo/. Repos are created
- * implicitly on first push.
- *
  * Auth:
- *   - git endpoints: Authorization: Bearer <AUTH_TOKEN>
- *   - Web UI:        session cookie (logged in via /login); open if no token set
+ *   - git endpoints: Authorization: Bearer <AUTH_TOKEN> (if set)
+ *   - Web UI:        session cookie (login with AUTH_TOKEN); open if unset
+ *   - admin:         session cookie (login with ADMIN_PASSWORD); DB mode only
  */
 
-import { createBackend, Env } from "./storage";
+import { createBackend, hasDb, resolveBackend, Env } from "./storage";
+import { initDb } from "./db";
 import { Repo } from "./git/repo";
 import { RefStore } from "./git/refs";
 import { buildInfoRefsResponse, buildV2InfoRefsResponse, handleUploadPack, handleUploadPackV2, isV2 } from "./git/upload-pack";
@@ -28,6 +34,7 @@ import { buildReceiveInfoRefsResponse, handleReceivePack } from "./git/receive-p
 import { renderPage } from "./ui/layout";
 import { renderDashboard, renderRepoHome, renderTreePath, serveRaw, UiContext } from "./ui/pages";
 import { sessionForToken, setSessionCookie, clearSessionCookie, isUiAuthed, renderLoginPage } from "./ui/auth";
+import { handleAdmin, ADMIN_COOKIE } from "./admin";
 
 export { Repo };
 
@@ -35,15 +42,26 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
-    const baseUrl = ""; // served at root; relative links
+    const baseUrl = "";
+
+    // ---- Admin panel (DB mode only) ----
+    if (path === "/admin" || path.startsWith("/admin/")) {
+      if (!hasDb(env)) return new Response("Admin panel requires a D1 binding (DB mode).\n", { status: 404 });
+      try {
+        return await handleAdmin(request, env);
+      } catch (e) {
+        return new Response(`admin error: ${errMsg(e)}\n`, { status: 500 });
+      }
+    }
 
     // ---- Top-level UI routes ----
     if (path === "/" || path === "") {
-      return await withBackend(env, async (store) => {
+      return guard(request, env, async () => {
         await requireUiAuth(request, env);
-        const ctx = await uiContext(request, env, store, url);
+        if (hasDb(env)) await initDb(env.DB);
+        const ctx = await uiContext(request, env, url);
         const body = await renderDashboard(ctx);
-        return html(renderPage({ title: "Repositories", baseUrl, isAuthenticated: ctx.isAuthed, authTokenConfigured: ctx.hasToken, bodyInner: body }));
+        return html(renderPage({ title: "Repositories", baseUrl, isAuthenticated: ctx.isAuthed, authTokenConfigured: ctx.hasToken, isAdmin: isAdminAuthed(request, env), bodyInner: body }));
       });
     }
 
@@ -63,12 +81,14 @@ export default {
     // Strip trailing slash for the rest (but keep "/").
     const normPath = path.replace(/\/+$/, "") || "/";
 
-    // ---- Git smart-http protocol routes (Bearer auth) ----
+    // ---- Git smart-http protocol routes ----
     const refsMatch = normPath.match(/^(.+)\/info\/refs$/);
     if (refsMatch) {
-      return await withBackend(env, async (store) => {
+      const repoName = sanitizeRepo(refsMatch[1].replace(/^\/+/, ""));
+      return guard(request, env, async () => {
         requireGitAuth(request, env);
-        const repoName = sanitizeRepo(refsMatch[1].replace(/^\/+/, ""));
+        const store = await resolveBackend(env, repoName);
+        if (!store) return notFound("repository not registered (configure it in /admin)");
         const repo = new Repo(repoName, store);
         const refs = new RefStore(repoName, store);
         const service = url.searchParams.get("service") || "";
@@ -87,9 +107,11 @@ export default {
 
     const upMatch = normPath.match(/^(.+)\/git-upload-pack$/);
     if (upMatch) {
-      return await withBackend(env, async (store) => {
+      const repoName = sanitizeRepo(upMatch[1].replace(/^\/+/, ""));
+      return guard(request, env, async () => {
         requireGitAuth(request, env);
-        const repoName = sanitizeRepo(upMatch[1].replace(/^\/+/, ""));
+        const store = await resolveBackend(env, repoName);
+        if (!store) return notFound("repository not registered");
         const repo = new Repo(repoName, store);
         const refs = new RefStore(repoName, store);
         const body = request.body as ReadableStream<Uint8Array>;
@@ -102,24 +124,29 @@ export default {
 
     const rpMatch = normPath.match(/^(.+)\/git-receive-pack$/);
     if (rpMatch) {
-      return await withBackend(env, async (store) => {
+      const repoName = sanitizeRepo(rpMatch[1].replace(/^\/+/, ""));
+      return guard(request, env, async () => {
         requireGitAuth(request, env);
-        const repoName = sanitizeRepo(rpMatch[1].replace(/^\/+/, ""));
-        const result = await handleReceivePack(new Repo(repoName, store), new RefStore(repoName, store), request.body as ReadableStream<Uint8Array>);
+        const store = await resolveBackend(env, repoName);
+        if (!store) return notFound("repository not registered");
+        const repo = new Repo(repoName, store);
+        const refs = new RefStore(repoName, store);
+        const result = await handleReceivePack(repo, refs, request.body as ReadableStream<Uint8Array>);
         return gitResponse(result.contentType, result.body);
       });
     }
 
-    // ---- Web UI routes (cookie auth) ----
-    // /<repo>/tree/<rev>/<path...>
+    // ---- Web UI routes ----
     const treeMatch = normPath.match(/^\/(.+?)\/tree\/([^/]+)\/?(.*)$/);
     if (treeMatch) {
-      return await withBackend(env, async (store) => {
+      const repoName = sanitizeRepo(treeMatch[1]);
+      return guard(request, env, async () => {
         await requireUiAuth(request, env);
-        const repoName = sanitizeRepo(treeMatch[1]);
+        const store = await resolveBackend(env, repoName);
+        if (!store) return notFound("repository not registered");
         const rev = treeMatch[2];
         const pathParts = treeMatch[3] ? treeMatch[3].split("/").map(decodeURIComponent).filter(Boolean) : [];
-        const ctx = await uiContext(request, env, store, url);
+        const ctx = await uiContext(request, env, url);
         const repo = new Repo(repoName, store);
         const refs = new RefStore(repoName, store);
         let body: string;
@@ -128,16 +155,17 @@ export default {
         } catch (e) {
           body = `<div class="error">${escapeHtmlForUi(errMsg(e))}</div>`;
         }
-        return html(renderPage({ title: `${repoName} · git-workers`, currentRepo: repoName, baseUrl, isAuthenticated: ctx.isAuthed, authTokenConfigured: ctx.hasToken, bodyInner: body }));
+        return html(renderPage({ title: `${repoName} · git-workers`, currentRepo: repoName, baseUrl, isAuthenticated: ctx.isAuthed, authTokenConfigured: ctx.hasToken, isAdmin: isAdminAuthed(request, env), bodyInner: body }));
       });
     }
 
-    // /<repo>/raw/<rev>/<path...>
     const rawMatch = normPath.match(/^\/(.+?)\/raw\/([^/]+)\/?(.*)$/);
     if (rawMatch) {
-      return await withBackend(env, async (store) => {
-        requireGitAuth(request, env); // raw access gated like git access
-        const repoName = sanitizeRepo(rawMatch[1]);
+      const repoName = sanitizeRepo(rawMatch[1]);
+      return guard(request, env, async () => {
+        requireGitAuth(request, env);
+        const store = await resolveBackend(env, repoName);
+        if (!store) return notFound("repository not registered");
         const rev = rawMatch[2];
         const pathParts = rawMatch[3] ? rawMatch[3].split("/").map(decodeURIComponent).filter(Boolean) : [];
         const repo = new Repo(repoName, store);
@@ -150,10 +178,12 @@ export default {
 
     // /<repo> — repo home (UI)
     if (/^\/[^/]+$/.test(normPath) || /^\/[^/]+\/$/.test(path)) {
-      return await withBackend(env, async (store) => {
+      const repoName = sanitizeRepo(normPath.replace(/^\/+/, ""));
+      return guard(request, env, async () => {
         await requireUiAuth(request, env);
-        const repoName = sanitizeRepo(normPath.replace(/^\/+/, ""));
-        const ctx = await uiContext(request, env, store, url);
+        const store = await resolveBackend(env, repoName);
+        if (!store) return notFound("repository not registered");
+        const ctx = await uiContext(request, env, url);
         const repo = new Repo(repoName, store);
         const refs = new RefStore(repoName, store);
         let body: string;
@@ -162,7 +192,7 @@ export default {
         } catch (e) {
           body = `<div class="error">${escapeHtmlForUi(errMsg(e))}</div>`;
         }
-        return html(renderPage({ title: `${repoName} · git-workers`, currentRepo: repoName, baseUrl, isAuthenticated: ctx.isAuthed, authTokenConfigured: ctx.hasToken, bodyInner: body }));
+        return html(renderPage({ title: `${repoName} · git-workers`, currentRepo: repoName, baseUrl, isAuthenticated: ctx.isAuthed, authTokenConfigured: ctx.hasToken, isAdmin: isAdminAuthed(request, env), bodyInner: body }));
       });
     }
 
@@ -171,21 +201,15 @@ export default {
 } satisfies ExportedHandler<Env>;
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Guards + helpers
 // ---------------------------------------------------------------------------
 
-async function withBackend(
-  env: Env,
-  fn: (store: ReturnType<typeof createBackend>) => Promise<Response>,
-): Promise<Response> {
-  let store;
+/** Run an async handler, translating controlled exceptions into responses. */
+async function guard(request: Request, env: Env, fn: () => Promise<Response>): Promise<Response> {
+  void request;
+  void env;
   try {
-    store = createBackend(env);
-  } catch (e) {
-    return new Response(`config error: ${errMsg(e)}\n`, { status: 500 });
-  }
-  try {
-    return await fn(store);
+    return await fn();
   } catch (e) {
     if (e instanceof RedirectLogin) {
       return new Response(redirect("/login"), { status: 302, headers: { Location: "/login" } });
@@ -197,8 +221,23 @@ async function withBackend(
   }
 }
 
-async function uiContext(request: Request, env: Env, store: ReturnType<typeof createBackend>, url: URL): Promise<UiContext> {
+async function uiContext(request: Request, env: Env, url: URL): Promise<UiContext> {
   const expected = env.AUTH_TOKEN ? await sessionForToken(env.AUTH_TOKEN) : null;
+  // In DB mode we don't use env STORAGE_*; expose an "any" backend for listRepos
+  // which only needs list/head on a backend to enumerate repo dirs. Build a
+  // throwaway one from env if present, else a memory stub.
+  let store: UiContext["store"];
+  if (hasDb(env)) {
+    // dashboard in DB mode lists registered repos from D1 (see renderDashboard);
+    // store is unused there, provide a no-op-ish backend.
+    try {
+      store = createBackend(env);
+    } catch {
+      store = null as any;
+    }
+  } else {
+    store = createBackend(env);
+  }
   return {
     baseUrl: "",
     store,
@@ -206,6 +245,8 @@ async function uiContext(request: Request, env: Env, store: ReturnType<typeof cr
     workerOrigin: url.origin,
     isAuthed: isUiAuthed(request, expected),
     hasToken: !!env.AUTH_TOKEN,
+    hasDb: hasDb(env),
+    db: env.DB,
   };
 }
 
@@ -215,6 +256,18 @@ async function requireUiAuth(request: Request, env: Env): Promise<void> {
   if (!isUiAuthed(request, expected)) {
     throw new RedirectLogin();
   }
+}
+
+function isAdminAuthed(request: Request, env: Env): boolean {
+  if (!env.ADMIN_PASSWORD) return false;
+  const cookie = request.headers.get("Cookie") || "";
+  for (const part of cookie.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq > 0 && part.slice(0, eq).trim() === ADMIN_COOKIE) {
+      if (part.slice(eq + 1).trim() === adminSessionValue(env)) return true;
+    }
+  }
+  return false;
 }
 
 class RedirectLogin extends Error {}
@@ -262,9 +315,18 @@ function html(s: string): Response {
   return new Response(s, { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
 }
 
+function notFound(msg: string): Response {
+  return new Response(msg + "\n", { status: 404 });
+}
+
 function redirect(loc: string): string {
-  // body for 302 (rarely seen)
   return `<a href="${loc}">Redirect</a>`;
+}
+
+export function adminSessionValue(env: Env): string {
+  // admin session = sha256(ADMIN_PASSWORD) so it's verifiable without storage
+  // (computed async in admin.ts; here we return a marker the admin module checks)
+  return env.ADMIN_PASSWORD ?? "";
 }
 
 function escapeHtmlForUi(s: string): string {
