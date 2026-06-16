@@ -14,10 +14,17 @@ interface MemObject {
   contentType: string;
 }
 
+/**
+ * Module-level singleton store so data persists across requests within the same
+ * isolate. (Workers may run multiple isolates in production; this backend is for
+ * local testing/demos only, not production.)
+ */
+const GLOBAL_STORE = new Map<string, MemObject>();
+let GLOBAL_COUNTER = 0;
+
 export class MemoryBackend implements StorageBackend {
   readonly kind = "memory";
-  private store = new Map<string, MemObject>();
-  private counter = 0;
+  private store = GLOBAL_STORE;
 
   async get(key: string, range?: ByteRange): Promise<ReadableStream<Uint8Array> | null> {
     const obj = this.store.get(key);
@@ -49,8 +56,8 @@ export class MemoryBackend implements StorageBackend {
       }
     }
     const bytes = await toBytes(body);
-    this.counter++;
-    const version = this.counter;
+    GLOBAL_COUNTER++;
+    const version = GLOBAL_COUNTER;
     this.store.set(key, { bytes, version, contentType: opts.contentType ?? "application/octet-stream" });
     return { etag: String(version) };
   }

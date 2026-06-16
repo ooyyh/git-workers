@@ -127,7 +127,7 @@ export class RefStore {
 
   /**
    * Depth-first walk for loose ref files under a directory.
-   * `dir` is repo-relative (e.g. "refs"). Recurses into sub-directories.
+   * `dir` is repo-relative (e.g. "refs", "refs/heads"). Recurses into sub-dirs.
    */
   private async walk(dir: string, out: string[]): Promise<void> {
     const listPrefix = `${this.repo}/${dir}`.replace(/\/+$/, "");
@@ -137,15 +137,15 @@ export class RefStore {
     } catch {
       return;
     }
-    // Each entry key is backend-root-relative, so it starts with "<repo>/<dir>/".
+    // Each entry key is backend-root-relative, starting with "<repo>/<dir>/".
     const prefixLen = listPrefix.length + 1; // +1 for the '/'
     for (const e of entries) {
       if (!e.key.startsWith(listPrefix + "/")) continue;
-      const rel = e.key.slice(prefixLen);
+      const rel = e.key.slice(prefixLen); // name within `dir`
       if (e.isDirectory) {
-        await this.walk(rel, out);
+        // Recurse with the full repo-relative sub-path.
+        await this.walk(`${dir}/${rel}`, out);
       } else {
-        // rel is now repo-relative already (dir is repo-relative), reconstruct full ref name
         out.push(`${dir}/${rel}`);
       }
     }

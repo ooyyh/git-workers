@@ -24,7 +24,7 @@ import { createBackend, Env } from "./storage";
 import { Repo } from "./git/repo";
 import { RefStore } from "./git/refs";
 import { buildInfoRefsResponse, buildV2InfoRefsResponse, handleUploadPack, handleUploadPackV2, isV2 } from "./git/upload-pack";
-import { buildReceiveInfoRefsResponse, buildV2ReceiveInfoRefsResponse, handleReceivePack } from "./git/receive-pack";
+import { buildReceiveInfoRefsResponse, handleReceivePack } from "./git/receive-pack";
 import { renderPage } from "./ui/layout";
 import { renderDashboard, renderRepoHome, renderTreePath, serveRaw, UiContext } from "./ui/pages";
 import { sessionForToken, setSessionCookie, clearSessionCookie, isUiAuthed, renderLoginPage } from "./ui/auth";
@@ -79,9 +79,6 @@ export default {
           return gitResponse("application/x-git-upload-pack-advertisement", await buildInfoRefsResponse(repo, refs));
         }
         if (service === "git-receive-pack") {
-          if (isV2(request.headers.get("Git-Protocol"))) {
-            return gitResponse("application/x-git-receive-pack-advertisement", await buildV2ReceiveInfoRefsResponse());
-          }
           return gitResponse("application/x-git-receive-pack-advertisement", await buildReceiveInfoRefsResponse(repo, refs));
         }
         return await dumbInfoRefs(refs);

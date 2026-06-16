@@ -141,9 +141,28 @@ interface StorageBackend {
 ```
 The git protocol needs (1) ranged reads, (2) atomic compare-and-swap for ref updates, (3) listing — and that's exactly this contract. Add a new backend by implementing these five methods.
 
+## Verification
+
+`npm test` runs two test suites, both using a **real `git`** binary as the oracle:
+
+1. **`test/roundtrip.ts`** — packfile interop:
+   - `git pack-objects` → our `parsePack`: all objects parsed, zero content mismatches (incl. ofs/ref deltas).
+   - our `buildPackAsync` → `git index-pack` + `git verify-pack` + `git unpack-objects`: all accepted.
+2. **`test/protocol.ts`** — in-memory smart-HTTP round trip (calls the Worker's `fetch` directly, memory backend):
+   - receive-pack: `info/refs` advertisement + POST (unpack a real git pack → loose objects + atomic ref CAS) → `unpack ok`.
+   - upload-pack v2: `info/refs` (`version 2`) + `ls-refs` (returns `refs/heads/main`) + `fetch` → a pack that real `git` index/unpack accepts with correct tree content.
+
+Additional:
+- `test/e2e.ts` / `test/inprocess.ts` — full real-`git` push/clone/pull over HTTP against a running worker (start one with `STORAGE_TYPE=memory npx wrangler dev`, then `npm run test:e2e`). UI routes (dashboard, repo home, tree browse, raw) are checked too.
+
+```bash
+npm test              # protocol + roundtrip (no server needed)
+npm run typecheck     # strict TS, zero errors
+```
+
 ## Project status
 
-Reference implementation / proof-of-concept. Verified to compile, typecheck clean, and boot as a Worker. End-to-end interop with a real `git` client should be confirmed against your specific storage backend before production use — see `docs/feasibility.md` §13 (open questions) for the few items to validate first.
+Working reference implementation. The git smart-HTTP protocol layer (upload-pack v0/v1/v2, receive-pack, pack parse/generate, refs, CAS) is verified against real `git`. The storage backends reuse proven SigV4/WebDAV client code from [clist](https://github.com/ooyyh/clist); before production use, confirm your specific backend honors conditional writes (`If-Match`/`If-None-Match`) for ref atomicity — see `docs/feasibility.md` §13.
 
 ## License
 

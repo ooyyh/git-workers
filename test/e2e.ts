@@ -72,7 +72,8 @@ async function main() {
   // ---- UI: repo home renders + shows README + file list ----
   console.log("\n[3/6] repo home renders...");
   const home = spawnSync("curl", ["-s", `${WORKER_URL}/${REPO_NAME}`], { encoding: "utf8" });
-  const checks = ["E2E Test", "README", "src", "app.ts", "Clone", "main"];
+  // top-level tree has README.md + src/ (app.ts is nested under src/)
+  const checks = ["E2E Test", "README", "src", "Clone", "main"];
   for (const c of checks) {
     if (!home.stdout.includes(c)) {
       console.error(`FAIL: repo home missing expected content '${c}'`);

@@ -30,6 +30,10 @@ export async function buildReceiveInfoRefsResponse(_repo: Repo, refs: RefStore):
   const allRefs = await refs.listRefs();
   const parts: Uint8Array[] = [];
 
+  // Smart-HTTP service banner comes first (then flush), before the ref ad.
+  parts.push(pktLineStr("# service=git-receive-pack\n"));
+  parts.push(pktFlushBytes());
+
   if (allRefs.length === 0) {
     parts.push(pktLineStr(`0000000000000000000000000000000000000000 capabilities^{}` + `\0${RECEIVE_CAPABILITIES.join(" ")}\n`));
   } else {

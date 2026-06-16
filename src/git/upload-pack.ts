@@ -58,6 +58,12 @@ export async function buildInfoRefsResponse(_repo: Repo, refs: RefStore): Promis
 
   const parts: Uint8Array[] = [];
 
+  // Smart-HTTP service banner: the very first pkt-line must announce the
+  // service, followed by a flush-pkt, BEFORE the ref advertisement. Clients
+  // (and `git`) key on this to recognize a smart-http response.
+  parts.push(pktLineStr("# service=git-upload-pack\n"));
+  parts.push(pktFlushBytes());
+
   if (allRefs.length === 0) {
     // Empty repo: advertise a zero-id capabilities^{} line.
     const first = `0000000000000000000000000000000000000000 capabilities^{}` +

@@ -11,7 +11,10 @@
     "deploy": "wrangler deploy",
     "typegen": "wrangler types",
     "typecheck": "wrangler types && tsc --noEmit",
-    "test": "echo 'tests: see README manual smoke test with a real git client' && exit 0"
+    "test:protocol": "node test/_bundle-worker.mjs && node --experimental-strip-types test/protocol.ts",
+    "test:roundtrip": "node test/_bundle-pack.mjs && node --experimental-strip-types test/roundtrip.ts",
+    "test:e2e": "node --experimental-strip-types test/e2e.ts",
+    "test": "npm run test:protocol && npm run test:roundtrip"
   },
   "dependencies": {
     "pako": "^2.1.0"
