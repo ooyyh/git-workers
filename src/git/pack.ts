@@ -279,6 +279,80 @@ export async function parsePack(pack: Uint8Array): Promise<Map<string, ParsedPac
 }
 
 // ---------------------------------------------------------------------------
+// Pack index: sha -> byte range in the pack (for storing packs wholesale and
+// reading objects back via Range requests, avoiding one subrequest per object).
+// ---------------------------------------------------------------------------
+
+export interface PackIndexEntry {
+  /** Byte offset where this object's header starts in the .pack. */
+  offset: number;
+  /** Exclusive end offset (start of next object, or pack trailer). */
+  endOffset: number;
+  /** Resolved object type id (1=commit 2=tree 3=blob 4=tag). Deltas resolved. */
+  type: number;
+}
+
+export interface PackIndex {
+  /** 40-hex sha of the pack trailer (= pack filename). */
+  packSha: string;
+  entries: Record<string, PackIndexEntry>;
+}
+
+/**
+ * Build a pack index WITHOUT fully resolving/decompressing every object's content.
+ * We only need: each object's [offset, endOffset) and type. Deltas are resolved
+ * only to compute their sha (so the index is keyed by sha). Cheaper than parsePack
+ * since non-delta objects aren't hash-recomputed for storage (content stays in pack).
+ *
+ * Returns { index, objects } where objects is the fully-resolved map (reused for
+ * sha computation + integrity check during push).
+ */
+export async function buildPackIndex(pack: Uint8Array): Promise<{ index: PackIndex; objects: Map<string, ParsedPackObject> }> {
+  // Reuse parsePack to get resolved objects (sha, type, content) + their byte ranges.
+  // parsePack already walks offsets; we re-derive endOffset from the next object.
+  const reader = new ByteReader(pack);
+  const magic = new TextDecoder().decode(reader.bytes(4));
+  if (magic !== "PACK") throw new Error(`invalid pack magic: ${magic}`);
+  const version = reader.uint32BE();
+  if (version !== 2) throw new Error(`unsupported pack version: ${version}`);
+  const count = reader.uint32BE();
+
+  // First pass: record each object's start offset + type + compressed length.
+  interface Layout { offset: number; endOffset: number; type: number }
+  const layouts: Layout[] = [];
+  for (let i = 0; i < count; i++) {
+    const objStart = reader.pos;
+    const { type } = reader.readTypeAndSize();
+    if (type === 6) {
+      reader.readOffset(); // ofs
+    } else if (type === 7) {
+      reader.bytes(20); // base sha
+    }
+    const { consumed } = inflateOne(pack, reader.pos);
+    reader.pos += consumed;
+    layouts.push({ offset: objStart, endOffset: reader.pos, type });
+  }
+  // Trailer = last 20 bytes (SHA-1 of pack body).
+  const trailer = pack.subarray(pack.length - 20, pack.length);
+  const packSha = [...trailer].map((b) => b.toString(16).padStart(2, "0")).join("");
+
+  // Resolve objects (for sha + integrity) via parsePack.
+  const objects = await parsePack(pack);
+
+  const entries: Record<string, PackIndexEntry> = {};
+  const shas = [...objects.keys()];
+  // objects Map iteration order matches parsePack order = layouts order (same i).
+  shas.forEach((sha, i) => {
+    const lay = layouts[i];
+    if (!lay) return;
+    const obj = objects.get(sha)!;
+    entries[sha] = { offset: lay.offset, endOffset: lay.endOffset, type: TYPE_ID[obj.type] };
+  });
+
+  return { index: { packSha, entries }, objects };
+}
+
+// ---------------------------------------------------------------------------
 // Pack generation (for upload-pack / clone / fetch)
 //
 // We emit a valid packfile with NO deltas (all base objects, individually

@@ -246,14 +246,39 @@ export async function handleUploadPackV2(
   }
 
   if (command === "fetch") {
-    // Build a pack from wants minus haves, same reachability walk as v1.
-    const haveSet = new Set(haveShas);
-    const objects = await collectObjects(repo, wantShas, haveSet);
-    const pack = await buildPackAsync(objects);
-
     const parts: Uint8Array[] = [];
-    // acknowledgments section (we NAK any haves for simplicity → send full pack)
     parts.push(pktLineStr("packfile\n"));
+
+    // Clone fast-path: no haves → if every want lives in ONE pack, forward that
+    // pack verbatim (1 subrequest) instead of reading N objects + rebuilding.
+    // This is the common `git clone` and keeps clone within the subrequest budget.
+    let pack: Uint8Array | null = null;
+    if (haveShas.length === 0 && wantShas.length > 0) {
+      const firstPack = await repo.findPackContaining(wantShas[0]);
+      if (firstPack) {
+        let allInSame = true;
+        for (const w of wantShas.slice(1)) {
+          if ((await repo.findPackContaining(w)) !== firstPack) {
+            allInSame = false;
+            break;
+          }
+        }
+        if (allInSame) {
+          try {
+            pack = await repo.readPackBytes(firstPack);
+          } catch {
+            pack = null;
+          }
+        }
+      }
+    }
+
+    if (!pack) {
+      // Slow path: walk wants minus haves, rebuild an undeltified pack.
+      const haveSet = new Set(haveShas);
+      const objects = await collectObjects(repo, wantShas, haveSet);
+      pack = await buildPackAsync(objects);
+    }
 
     // Stream the pack via side-band channel 1.
     const maxPkt = 65515; // side-band-64k

@@ -36,20 +36,29 @@ function sh(args: string[], cwd: string) {
   return r.stdout.trim();
 }
 
-// --- Build a real repo + a real pack (no deltas) to push ---
+// --- Build a real repo with many objects + deltas to push ---
 const root = mkdtempSync(join(tmpdir(), "proto-"));
 const repo = join(root, "repo");
 mkdirSync(repo, { recursive: true });
 sh(["git", "init", "-q", "-b", "main"], repo);
 sh(["git", "config", "user.email", "t@t.t"], repo);
 sh(["git", "config", "user.name", "P"], repo);
-writeFileSync(join(repo, "README.md"), "# Proto\n\nTest.\n");
 mkdirSync(join(repo, "src"), { recursive: true });
-writeFileSync(join(repo, "src", "a.ts"), "export const n = 1;\n");
-sh(["git", "add", "."], repo);
-sh(["git", "commit", "-q", "-m", "c1"], repo);
+// Several commits that modify the same file → git emits OFS_DELTA objects,
+// exercising the pack index + delta-resolution read path.
+writeFileSync(join(repo, "README.md"), "# Proto\n\nMulti-object test.\n");
+let body = "";
+for (let i = 0; i < 40; i++) body += `line ${i}: some content\n`;
+writeFileSync(join(repo, "src", "a.ts"), body);
+for (let c = 0; c < 8; c++) {
+  writeFileSync(join(repo, "src", `f${c}.ts`), `// file ${c}\nexport const x = ${c};\n`);
+  body = body + `\n// appended in commit ${c}\n`;
+  writeFileSync(join(repo, "src", "a.ts"), body);
+  sh(["git", "add", "."], repo);
+  sh(["git", "commit", "-q", `-m commit ${c}`], repo);
+}
 
-// Build a pack of all objects (no deltas) — this is what receive-pack receives.
+// Build a pack of all objects (this is what receive-pack receives).
 const packBase = join(root, "p");
 await new Promise<void>((res, rej) => {
   const a = spawn("git", ["rev-list", "--objects", "--all"], { cwd: repo });
@@ -126,10 +135,12 @@ if (uo.status !== 0) throw new Error("unpack-objects failed");
 sh(["git", "update-ref", "refs/heads/main", headSha], repo2);
 sh(["git", "symbolic-ref", "HEAD", "refs/heads/main"], repo2);
 const show = spawnSync("git", ["show", "HEAD:README.md"], { cwd: repo2, encoding: "utf8" });
-if (!show.stdout.includes("# Proto")) throw new Error("fetched content mismatch");
+if (!show.stdout.includes("Multi-object test")) throw new Error("fetched content mismatch: " + show.stdout.slice(0, 80));
 const show2 = spawnSync("git", ["show", "HEAD:src/a.ts"], { cwd: repo2, encoding: "utf8" });
-if (!show2.stdout.includes("export const n = 1")) throw new Error("fetched nested file mismatch");
-console.log("    fetched pack unpacks to correct tree (README + src/a.ts)");
+if (!show2.stdout.includes("line 0:") || !show2.stdout.includes("appended in commit 7")) {
+  throw new Error("fetched nested file mismatch (delta not resolved correctly): " + show2.stdout.slice(0, 120));
+}
+console.log("    fetched pack unpacks to correct tree (README + src/a.ts with deltas)");
 
 if (!process.env.KEEP) rmSync(root, { recursive: true, force: true });
 console.log("\nALL PROTOCOL TESTS PASSED ✅");

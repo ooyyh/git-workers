@@ -15,8 +15,9 @@
  */
 
 import { StorageBackend } from "../storage/types";
-import { deflate, gitHash, inflate } from "./crypto";
-import { GitObject, ObjectType, objectBytes, parseObject } from "./object";
+import { deflate, gitHash, inflate, readStreamToBytes } from "./crypto";
+import { GitObject, ObjectType, objectBytes, parseObject, PACK_TYPE_ID } from "./object";
+import { buildPackIndex, PackIndex, applyDelta, inflateOne } from "./pack";
 
 export class Repo {
   constructor(
@@ -27,23 +28,165 @@ export class Repo {
   private objectKey(sha: string): string {
     return `${this.name}/objects/${sha.slice(0, 2)}/${sha.slice(2)}`;
   }
+  private packKey(packSha: string): string {
+    return `${this.name}/objects/pack/pack-${packSha}.pack`;
+  }
+  private idxKey(packSha: string): string {
+    return `${this.name}/objects/pack/pack-${packSha}.idx.json`;
+  }
 
-  /** True if the object exists. */
+  /** Read an entire pack file's bytes (1 subrequest). */
+  async readPackBytes(packSha: string): Promise<Uint8Array> {
+    const stream = await this.store.get(this.packKey(packSha));
+    if (!stream) throw new Error(`pack not found: ${packSha}`);
+    return readStreamToBytes(stream);
+  }
+
+  /** Find the pack sha whose index contains `sha`, or null. */
+  async findPackContaining(sha: string): Promise<string | null> {
+    if ((await this.store.head(this.objectKey(sha))) !== null) return null; // loose
+    for (const packSha of await this.listPacks()) {
+      const idx = await this.getPackIndex(packSha);
+      if (idx?.entries[sha]) return packSha;
+    }
+    return null;
+  }
+
+  /** True if the object exists (loose or in any pack). */
   async hasObject(sha: string): Promise<boolean> {
-    return (await this.store.head(this.objectKey(sha))) !== null;
+    if ((await this.store.head(this.objectKey(sha))) !== null) return true;
+    // check pack indexes
+    for (const packSha of await this.listPacks()) {
+      const idx = await this.getPackIndex(packSha);
+      if (idx?.entries[sha]) return true;
+    }
+    return false;
+  }
+
+  /** Read an object (loose first, then packs). @throws if missing. */
+  async readObject(sha: string): Promise<GitObject> {
+    // 1. loose
+    const stream = await this.store.get(this.objectKey(sha));
+    if (stream) {
+      const compressed = await readStreamToBytes(stream);
+      return parseObject(await inflate(compressed));
+    }
+    // 2. packs (by index)
+    for (const packSha of await this.listPacks()) {
+      const idx = await this.getPackIndex(packSha);
+      if (!idx) continue;
+      const entry = idx.entries[sha];
+      if (!entry) continue;
+      // Range-read just this object's compressed bytes from the pack.
+      const objStream = await this.store.get(this.packKey(packSha), {
+        start: entry.offset,
+        endExclusive: entry.endOffset,
+      });
+      if (!objStream) continue;
+      const objBytes = await readStreamToBytes(objStream);
+      const type = await this.resolvePackedType(packSha, entry.offset, objBytes);
+      return type;
+    }
+    throw new Error(`object not found: ${sha}`);
+  }
+
+  /** Resolve a packed object's type+content from its sliced bytes (handles deltas). */
+  private async resolvePackedType(packSha: string, offset: number, slice: Uint8Array): Promise<GitObject> {
+    // slice starts at the object header. Parse type/size, then inflate; resolve deltas
+    // by reading base slices recursively (deltas reference bases within the same pack).
+    let pos = 0;
+    const first = slice[pos++];
+    const rawType = (first >> 4) & 0x07;
+    // size varint (not needed for content length; inflate determines it)
+    if (first & 0x80) {
+      while (slice[pos++] & 0x80) {}
+    }
+
+    if (rawType === 6) {
+      // OFS_DELTA: read offset varint, then inflate delta, recurse for base.
+      let b = slice[pos++];
+      let ofs = b & 0x7f;
+      while (b & 0x80) {
+        b = slice[pos++];
+        ofs = ((ofs + 1) << 7) | (b & 0x7f);
+      }
+      const { out: delta } = inflateOne(slice, pos);
+      const baseOffset = offset - ofs;
+      const base = await this.readPackedAt(packSha, baseOffset);
+      return { type: base.type, content: applyDelta(base.content, delta) };
+    }
+    if (rawType === 7) {
+      throw new Error("REF_DELTA in stored pack unsupported (pushed packs use OFS_DELTA)");
+    }
+    const typeName = PACK_TYPE_ID[rawType];
+    if (!typeName) throw new Error(`unknown pack type id: ${rawType}`);
+    const { out: content } = inflateOne(slice, pos);
+    return { type: typeName, content };
+  }
+
+  /** Read a packed object at an absolute pack offset (recurses for delta bases). */
+  private async readPackedAt(packSha: string, offset: number): Promise<GitObject> {
+    const idx = await this.getPackIndex(packSha);
+    if (!idx) throw new Error("missing pack index");
+    const entry = Object.values(idx.entries).find((e) => e.offset === offset);
+    const endOffset = entry ? entry.endOffset : offset + 65536; // fallback window
+    const stream = await this.store.get(this.packKey(packSha), { start: offset, endExclusive: endOffset });
+    if (!stream) throw new Error("pack range read failed");
+    const slice = await readStreamToBytes(stream);
+    return this.resolvePackedType(packSha, offset, slice);
+  }
+
+  // pack index cache (per Repo instance = per request)
+  private packIndexCache = new Map<string, PackIndex | null>();
+
+  /** List pack shas present in objects/pack/. */
+  async listPacks(): Promise<string[]> {
+    let entries;
+    try {
+      entries = await this.store.list(`${this.name}/objects/pack`);
+    } catch {
+      return [];
+    }
+    const shas: string[] = [];
+    for (const e of entries) {
+      if (e.isDirectory) continue;
+      const m = e.key.match(/pack-([0-9a-f]{40})\.pack$/);
+      if (m) shas.push(m[1]);
+    }
+    return shas;
+  }
+
+  /** Load a pack's index (cached). Returns null if not found. */
+  async getPackIndex(packSha: string): Promise<PackIndex | null> {
+    if (this.packIndexCache.has(packSha)) return this.packIndexCache.get(packSha) ?? null;
+    const stream = await this.store.get(this.idxKey(packSha));
+    let idx: PackIndex | null = null;
+    if (stream) {
+      try {
+        idx = JSON.parse(new TextDecoder().decode(await readStreamToBytes(stream))) as PackIndex;
+      } catch {
+        idx = null;
+      }
+    }
+    this.packIndexCache.set(packSha, idx);
+    return idx;
   }
 
   /**
-   * Read an object. @throws if missing or corrupt.
+   * Store a complete packfile + its index in ONE operation each (2 subrequests),
+   * instead of one write per object. Returns the map of resolved objects.
    */
-  async readObject(sha: string): Promise<GitObject> {
-    const stream = await this.store.get(this.objectKey(sha));
-    if (!stream) throw new Error(`object not found: ${sha}`);
-    const compressed = await readAll(stream);
-    const raw = await inflate(compressed);
-    const obj = parseObject(raw);
-    return obj;
+  async storePack(packBytes: Uint8Array): Promise<{ packSha: string; objects: Map<string, { sha: string; type: ObjectType; content: Uint8Array }> }> {
+    const { index, objects } = await buildPackIndex(packBytes);
+    const packSha = index.packSha;
+    // Store pack (overwrite-if-same is fine; ifNoneMatch would block re-push).
+    await this.store.put(this.packKey(packSha), packBytes);
+    // Store index JSON.
+    await this.store.put(this.idxKey(packSha), new TextEncoder().encode(JSON.stringify(index)));
+    this.packIndexCache.set(packSha, index);
+    return { packSha, objects };
   }
+
 
   /**
    * Write an object, returning its sha. Verifies the content hashes to the
@@ -103,23 +246,3 @@ export class Repo {
   }
 }
 
-async function readAll(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {
-  const reader = stream.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (value) {
-      chunks.push(value);
-      total += value.length;
-    }
-  }
-  const out = new Uint8Array(total);
-  let off = 0;
-  for (const c of chunks) {
-    out.set(c, off);
-    off += c.length;
-  }
-  return out;
-}

@@ -19,7 +19,6 @@
 import { Repo } from "./repo";
 import { RefStore } from "./refs";
 import { CasError } from "../storage/types";
-import { parsePack } from "./pack";
 import { pktFlushBytes, pktLineStr } from "./pktline";
 import { readStreamToBytes } from "./crypto";
 
@@ -112,10 +111,14 @@ export async function handleReceivePack(
     const packBytes = body.subarray(packOffset);
     if (packBytes.length >= 12) {
       try {
-        const objects = await parsePack(packBytes);
-        for (const [, obj] of objects) {
-          await repo.writeObject(obj.type, obj.content);
-        }
+        // Store the pack wholesale (1-2 subrequests) instead of one write per
+        // object. buildPackIndex parses + validates integrity + computes shas;
+        // storePack writes pack + index. This keeps push within Workers'
+        // subrequest budget regardless of object count.
+        const { objects } = await repo.storePack(packBytes);
+        // Also write any NEW objects as loose? No — they're in the pack and
+        // readObject() will find them via the index. Nothing else to do.
+        void objects;
       } catch (e) {
         unpackOk = false;
         unpackErr = e instanceof Error ? e.message : String(e);
