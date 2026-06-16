@@ -6,6 +6,9 @@
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
 
+  "//limits": "Paid plan: raise the per-request CPU budget so larger pushes/fetches don't hit 'Worker exceeded CPU time limit'. Default ~30s; this sets 60s. Free plan is capped at 10ms and will reject most real pushes.",
+  "limits": { "cpu_ms": 60000 },
+
   "//vars": "Non-secret config here. Secrets (STORAGE_*, AUTH_TOKEN, ADMIN_PASSWORD, CONFIG_KEY) go in .dev.vars (local) or `wrangler secret put` (deployed) — NEVER commit them.",
   "vars": {
     "STORAGE_TYPE": "memory",
@@ -24,3 +27,4 @@
     }
   ]
 }
+

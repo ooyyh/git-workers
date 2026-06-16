@@ -72,26 +72,26 @@ export class ByteReader {
  * Inflate a single zlib stream starting at `data[start]`, returning the
  * decompressed bytes and how many input bytes were consumed.
  *
- * Packfiles concatenate multiple zlib streams with no length prefix, so we
- * isolate one stream by linear-prefix search: feed increasing prefixes with
- * isFinal=true until the inflate succeeds (err==0 && result!=null). pako stops
- * cleanly at the stream's ADLER32 trailer, so the minimal successful prefix is
- * exactly one complete zlib stream. Per-object compressed sizes are small
- * (tens–hundreds of bytes typically), so this is cheap in practice.
+ * Packfiles concatenate multiple zlib streams with no length prefix. We use
+ * **byte-incremental push into ONE Inflate instance**: each byte advances the
+ * same decompressor, and pako produces `result` the instant the current
+ * stream's ADLER32 trailer is consumed — giving a clean per-stream boundary
+ * without reading into the next stream. This is O(n) in the compressed size
+ * (one cheap push() per byte on a single state machine), vs the O(n²)
+ * linear-prefix approach of constructing a fresh Inflate per candidate length
+ * — which blew the Worker CPU limit on real pushes (~17x faster in benchmarks).
  */
 export function inflateOne(data: Uint8Array, start: number): { out: Uint8Array; consumed: number } {
-  for (let end = start + 2; end <= data.length; end++) {
-    const inf = new pako.Inflate();
-    inf.push(data.subarray(start, end), true);
-    // pako sets `result` to a Uint8Array/string only when a complete stream is
-    // produced; it stays `undefined` (NOT null) while waiting. An empty-but-valid
-    // stream yields an empty Uint8Array, so we also accept length 0 via typeof.
-    if (inf.err === 0 && inf.result !== undefined && inf.result !== null) {
-      const result = inf.result;
-      const out = typeof result === "string" ? new TextEncoder().encode(result) : result;
-      return { out, consumed: end - start };
+  const enc = new TextEncoder();
+  const inf = new pako.Inflate();
+  for (let i = start; i < data.length; i++) {
+    inf.push(data.subarray(i, i + 1), false);
+    if (inf.err) throw new Error(`pako inflate error at ${i} (from ${start}): ${inf.msg}`);
+    if (inf.result !== undefined && inf.result !== null) {
+      const r = inf.result;
+      const out = typeof r === "string" ? enc.encode(r) : r;
+      return { out, consumed: i + 1 - start };
     }
-    // pako returns err!=0 if the prefix is malformed (e.g. incomplete). Continue.
   }
   throw new Error(`inflateOne: no complete zlib stream found from offset ${start}`);
 }
@@ -233,18 +233,27 @@ export async function parsePack(pack: Uint8Array): Promise<Map<string, ParsedPac
       result = { type: base.type, content, sha };
     } else if (raw.type === 7) {
       const baseSha = raw.refDelta!;
-      // Find base in-pack by sha.
+      // Find base in-pack by sha. First try a fast lookup against resolved objects,
+      // then fall back to resolving remaining candidates (avoids O(n²) on every delta).
       let base: { type: ObjectType; content: Uint8Array } | undefined;
-      for (let j = 0; j < raws.length; j++) {
-        if (j === idx) continue;
-        try {
-          const r = await resolve(j);
-          if (r.sha === baseSha) {
-            base = r;
-            break;
+      for (const [, r] of resolved) {
+        if (r.sha === baseSha) {
+          base = r;
+          break;
+        }
+      }
+      if (!base) {
+        for (let j = 0; j < raws.length; j++) {
+          if (j === idx || resolved.has(j)) continue;
+          try {
+            const r = await resolve(j);
+            if (r.sha === baseSha) {
+              base = r;
+              break;
+            }
+          } catch {
+            // not yet resolvable
           }
-        } catch {
-          // not yet resolvable
         }
       }
       if (!base) throw new Error(`REF_DELTA base ${baseSha} not found in pack`);
