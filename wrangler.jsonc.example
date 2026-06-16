@@ -5,6 +5,8 @@
   "compatibility_date": "2025-04-04",
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
+
+  "//vars": "Non-secret config here. Secrets (STORAGE_*, AUTH_TOKEN, ADMIN_PASSWORD, CONFIG_KEY) go in .dev.vars (local) or `wrangler secret put` (deployed) — NEVER commit them.",
   "vars": {
     "STORAGE_TYPE": "memory",
     "STORAGE_PREFIX": "",

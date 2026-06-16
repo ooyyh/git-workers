@@ -4,5 +4,7 @@ node_modules/
 dist/
 *.log
 .DS_Store
+# local wrangler config (contains your real D1 database_id + vars) — copy from wrangler.jsonc.example
+wrangler.jsonc
 # test build artifacts
 test/.bundle-*.mjs
