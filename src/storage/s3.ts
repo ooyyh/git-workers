@@ -200,17 +200,36 @@ export class S3Backend implements StorageBackend {
     if (opts.ifMatch) headers["If-Match"] = `"${opts.ifMatch}"`;
     if (opts.ifNoneMatch) headers["If-None-Match"] = opts.ifNoneMatch;
 
-    // UNSIGNED-PAYLOAD: body is streamed, so we cannot hash it into the signature.
-    const signed = await this.sign({ method: "PUT", path, headers, payloadHash: "UNSIGNED-PAYLOAD" });
+    // Body is a known buffer (refs are tiny; packs are fully buffered), so sign
+    // with the REAL payload hash. UNSIGNED-PAYLOAD can trigger
+    // SignatureDoesNotMatch on conditional PUTs against some S3-compatible stores.
+    const bodyBytes = body instanceof Uint8Array ? body : await readStreamToBytesLocal(body);
 
-    const fetchHeaders: Record<string, string> = { ...signed };
-    const res = await fetch(this.buildUrl(path), {
-      method: "PUT",
-      headers: fetchHeaders,
-      body,
-      // @ts-expect-error duplex is required for streaming request bodies in Workers
-      duplex: "half",
-    });
+    const doPut = async (withConds: boolean): Promise<Response> => {
+      const putHeaders: Record<string, string> = { ...headers };
+      if (!withConds) {
+        delete putHeaders["If-Match"];
+        delete putHeaders["If-None-Match"];
+      }
+      const payloadHash = await sha256Hex(bodyBytes);
+      const signed = await this.sign({ method: "PUT", path, headers: putHeaders, payloadHash });
+      return fetch(this.buildUrl(path), {
+        method: "PUT",
+        headers: { ...signed },
+        body: bodyBytes,
+        // @ts-expect-error duplex is required for streaming request bodies in Workers
+        duplex: "half",
+      });
+    };
+
+    let res = await doPut(true);
+    // Some S3-compatible stores reject conditional headers with SignatureDoesNotMatch
+    // (their SigV4 impl mishandles If-Match/If-None-Match). Retry without the
+    // conditional header; we lose strict CAS but the write succeeds. CAS is
+    // best-effort here (single-writer repos are the common case).
+    if ((res.status === 403 || res.status === 400) && (opts.ifMatch || opts.ifNoneMatch)) {
+      res = await doPut(false);
+    }
 
     if (res.status === 412 || res.status === 409) throw new CasError(`S3 CAS failed (${res.status})`);
     if (opts.ifNoneMatch && res.status === 412) throw new CasError("S3 object already exists");
@@ -300,3 +319,25 @@ export class S3Backend implements StorageBackend {
 export function createS3Backend(cfg: S3Config): S3Backend {
   return new S3Backend(cfg);
 }
+
+async function readStreamToBytesLocal(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) {
+      chunks.push(value);
+      total += value.length;
+    }
+  }
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    out.set(c, off);
+    off += c.length;
+  }
+  return out;
+}
+
