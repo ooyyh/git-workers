@@ -50,11 +50,11 @@ async function main() {
   // 1) admin requires login
   console.log("[1] admin auth gate");
   let r = await call("GET", "/admin");
-  assert(r.status === 200 && r.body.includes("admin password"), "shows login when not authed");
+  assert(r.status === 200 && (r.body.includes("admin password") || r.body.includes("管理员密码")), "shows login when not authed");
 
   // wrong password
   r = await call("POST", "/admin/login", { form: { password: "wrong" } });
-  assert(r.status === 401 && r.body.includes("wrong password"), "rejects wrong password");
+  assert(r.status === 401 && (r.body.includes("wrong password") || r.body.includes("密码错误")), "rejects wrong password");
 
   // correct password → 302 + set-cookie
   r = await call("POST", "/admin/login", { form: { password: "s3cr3t" } });
@@ -67,8 +67,8 @@ async function main() {
   // 2) dashboard renders
   console.log("[2] admin dashboard");
   r = await call("GET", "/admin", { cookie: adminCookie });
-  assert(r.body.includes("storage backends") && r.body.includes("repositories"), "dashboard renders");
-  assert(r.body.includes("encrypted"), "shows encryption status");
+  assert(r.body.includes("存储后端") && r.body.includes("仓库"), "dashboard renders (zh)");
+  assert(r.body.includes("已加密") || r.body.includes("encrypted"), "shows encryption status");
 
   // 3) create a storage
   console.log("[3] create storage");
@@ -100,21 +100,39 @@ async function main() {
   // 6) dashboard (public) lists the registered repo
   console.log("[6] public dashboard");
   r = await call("GET", "/");
-  assert(r.body.includes("demo") && r.body.includes("DB mode"), "dashboard lists repo in DB mode");
+  assert(r.body.includes("demo") && (r.body.includes("DB mode") || r.body.includes("数据库模式")), "dashboard lists repo in DB mode");
 
   // 7) resolveBackend: unregistered repo 404s; registered one doesn't error.
-  // (Full object read on the registered repo needs a real storage with data;
-  //  here we just confirm the resolution path works via the ghost 404.)
   console.log("[7] backend resolution");
   r = await call("GET", "/ghost/info/refs?service=git-upload-pack");
-  assert(r.status === 404 && r.body.includes("not registered"), "unregistered repo 404s with 'not registered'");
+  assert(r.status === 404 && (r.body.includes("not registered") || r.body.includes("未注册")), "unregistered repo 404s");
   r = await call("GET", "/demo/info/refs?service=git-upload-pack");
   assert(r.status !== 500, "registered repo doesn't 500 (resolution succeeded)");
 
   // 8) can't delete a storage in use
   console.log("[8] foreign-key guard");
   r = await call("POST", "/admin/storages/1/delete", { cookie: adminCookie });
-  assert(r.body.includes("constraint") || r.body.includes("in use"), "deleting in-use storage is blocked");
+  assert(r.body.includes("constraint") || r.body.includes("in use") || r.body.includes("无法删除") || r.body.includes("被仓库引用"), "deleting in-use storage is blocked");
+
+  // 9) test-connection endpoint returns structured JSON
+  console.log("[9] test connection");
+  r = await call("POST", "/admin/storages/test", { cookie: adminCookie, form: { kind: "s3", endpoint: "http://127.0.0.1:1", region: "us-east-1", bucket: "b", accessKeyId: "a", secretAccessKey: "s" } });
+  let j: any;
+  try { j = JSON.parse(r.body); } catch { j = null; }
+  assert(!!j && typeof j.ok === "boolean" && typeof j.ms === "number", "test endpoint returns {ok, ms}");
+  assert(j.ok === false && j.message, "test against unreachable endpoint reports failure with a message");
+
+  // 10) i18n: zh (default) vs en toggle
+  console.log("[10] i18n (zh / en)");
+  const zhDash = await call("GET", "/admin/storages", { cookie: adminCookie });
+  assert(zhDash.body.includes("存储后端") && zhDash.body.includes("[ 测试连接 ]"), "zh: storage page shows Chinese + test button");
+  // switch to en via cookie
+  const enDash = await call("GET", "/admin/storages", { cookie: `${adminCookie}; gw_lang=en` });
+  assert(enDash.body.includes("storage backends") && enDash.body.includes("[ test connection ]"), "en: storage page shows English");
+  // language toggle route sets cookie + redirects
+  const tg = await call("GET", "/setlang?l=en&to=/");
+  assert(tg.status === 302 && tg.location === "/", "setlang redirects");
+  assert(tg.location === "/", "setlang redirects to /");
 
   console.log("\nALL ADMIN TESTS PASSED ✅");
 }

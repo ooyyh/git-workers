@@ -34,6 +34,7 @@ import { buildReceiveInfoRefsResponse, handleReceivePack } from "./git/receive-p
 import { renderPage } from "./ui/layout";
 import { renderDashboard, renderRepoHome, renderTreePath, serveRaw, UiContext } from "./ui/pages";
 import { sessionForToken, setSessionCookie, clearSessionCookie, isUiAuthed, renderLoginPage } from "./ui/auth";
+import { detectLang } from "./ui/i18n";
 import { handleAdmin, ADMIN_COOKIE } from "./admin";
 
 export { Repo };
@@ -54,6 +55,13 @@ export default {
       }
     }
 
+    // ---- Language toggle: sets gw_lang cookie, redirects back ----
+    if (path === "/setlang") {
+      const l = url.searchParams.get("l") === "en" ? "en" : "zh";
+      const to = url.searchParams.get("to") || "/";
+      return new Response(redirect(to), { status: 302, headers: { Location: to, "Set-Cookie": `gw_lang=${l}; Path=/; Max-Age=31536000; SameSite=Lax` } });
+    }
+
     // ---- Top-level UI routes ----
     if (path === "/" || path === "") {
       return guard(request, env, async () => {
@@ -61,13 +69,14 @@ export default {
         if (hasDb(env)) await initDb(env.DB);
         const ctx = await uiContext(request, env, url);
         const body = await renderDashboard(ctx);
-        return html(renderPage({ title: "Repositories", baseUrl, isAuthenticated: ctx.isAuthed, authTokenConfigured: ctx.hasToken, isAdmin: isAdminAuthed(request, env), bodyInner: body }));
+        return html(renderPage({ title: ctx.lang === "zh" ? "仓库 · git-workers" : "Repositories · git-workers", baseUrl, isAuthenticated: ctx.isAuthed, authTokenConfigured: ctx.hasToken, isAdmin: isAdminAuthed(request, env), lang: ctx.lang, bodyInner: body }));
       });
     }
 
     if (path === "/login") {
       if (request.method === "GET") {
-        return new Response(renderLoginPage(baseUrl, false), { headers: { "Content-Type": "text/html; charset=utf-8" } });
+        const ll = detectLang(request.headers.get("Cookie"));
+        return new Response(renderLoginPage(baseUrl, false, ll), { headers: { "Content-Type": "text/html; charset=utf-8" } });
       }
       if (request.method === "POST") {
         return await handleLogin(request, env);
@@ -155,7 +164,7 @@ export default {
         } catch (e) {
           body = `<div class="error">${escapeHtmlForUi(errMsg(e))}</div>`;
         }
-        return html(renderPage({ title: `${repoName} · git-workers`, currentRepo: repoName, baseUrl, isAuthenticated: ctx.isAuthed, authTokenConfigured: ctx.hasToken, isAdmin: isAdminAuthed(request, env), bodyInner: body }));
+        return html(renderPage({ title: `${repoName} · git-workers`, currentRepo: repoName, baseUrl, isAuthenticated: ctx.isAuthed, authTokenConfigured: ctx.hasToken, isAdmin: isAdminAuthed(request, env), lang: ctx.lang, bodyInner: body }));
       });
     }
 
@@ -192,7 +201,7 @@ export default {
         } catch (e) {
           body = `<div class="error">${escapeHtmlForUi(errMsg(e))}</div>`;
         }
-        return html(renderPage({ title: `${repoName} · git-workers`, currentRepo: repoName, baseUrl, isAuthenticated: ctx.isAuthed, authTokenConfigured: ctx.hasToken, isAdmin: isAdminAuthed(request, env), bodyInner: body }));
+        return html(renderPage({ title: `${repoName} · git-workers`, currentRepo: repoName, baseUrl, isAuthenticated: ctx.isAuthed, authTokenConfigured: ctx.hasToken, isAdmin: isAdminAuthed(request, env), lang: ctx.lang, bodyInner: body }));
       });
     }
 
@@ -245,6 +254,7 @@ async function uiContext(request: Request, env: Env, url: URL): Promise<UiContex
     workerOrigin: url.origin,
     isAuthed: isUiAuthed(request, expected),
     hasToken: !!env.AUTH_TOKEN,
+    lang: detectLang(request.headers.get("Cookie")),
     hasDb: hasDb(env),
     db: env.DB,
   };
@@ -286,11 +296,12 @@ class Unauthorized extends Error {}
 async function handleLogin(request: Request, env: Env): Promise<Response> {
   const form = await request.formData();
   const token = String(form.get("token") || "").trim();
+  const ll = detectLang(request.headers.get("Cookie"));
   if (env.AUTH_TOKEN && token === env.AUTH_TOKEN) {
     const sess = await sessionForToken(env.AUTH_TOKEN);
     return new Response(redirect("/"), { status: 302, headers: { Location: "/", "Set-Cookie": setSessionCookie(sess) } });
   }
-  return new Response(renderLoginPage("", true), { status: 401, headers: { "Content-Type": "text/html; charset=utf-8" } });
+  return new Response(renderLoginPage("", true, ll), { status: 401, headers: { "Content-Type": "text/html; charset=utf-8" } });
 }
 
 function sanitizeRepo(name: string): string {

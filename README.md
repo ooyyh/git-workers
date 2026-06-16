@@ -125,12 +125,16 @@ For multi-backend management from the browser:
 2. Deploy. Open `https://<worker>/admin` and log in with `ADMIN_PASSWORD`.
 
 3. In the panel:
-   - **Storages** → add backends (S3 / WebDAV), each with its endpoint + credentials (encrypted in D1).
+   - **Storages** → add backends (S3 / WebDAV), each with its endpoint + credentials (encrypted in D1). Use **[ test connection ]** to verify the backend is reachable before saving.
    - **Repos** → register each repo and assign it a storage backend + visibility.
 
 4. A repo must be **registered** before `git push`/`clone` in DB mode; unregistered repos return 404. Deleting a repo only removes the assignment — objects remain in storage.
 
 > Set `CONFIG_KEY`. Without it, credentials fall back to plaintext in D1 (the admin UI warns when this is the case).
+
+## Internationalization
+
+The UI is bilingual (中文 / English). Toggle with the **中 / EN** link in the header (persists via the `gw_lang` cookie). Default is 中文.
 
 ## Architecture
 

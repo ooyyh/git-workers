@@ -46,10 +46,14 @@ export function isUiAuthed(request: Request, expected: string | null): boolean {
 }
 
 /** Render the login page (POST form posts the token, sets the cookie). */
-export function renderLoginPage(baseUrl: string, error: boolean): string {
-  const errHtml = error ? `<div class="error">[ERR] incorrect token</div>` : "";
+export function renderLoginPage(baseUrl: string, error: boolean, lang: "zh" | "en" = "zh"): string {
+  const L = lang;
+  const sub = L === "zh" ? "登录以浏览仓库" : "authenticate to browse repositories";
+  const errHtml = error ? `<div class="error">[ERR] ${L === "zh" ? "令牌错误" : "incorrect token"}</div>` : "";
+  const title = L === "zh" ? "登录 · git-workers" : "login · git-workers";
+  const btn = L === "zh" ? "[ 登录 ]" : "[ login ]";
   return `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>login · git-workers</title>
+<html lang="${L}"><head><meta charset="utf-8"><title>${title}</title>
 <style>
 *{box-sizing:border-box}
 body{margin:0;background:#000;color:#c8f0c8;font-family:"JetBrains Mono",ui-monospace,Consolas,monospace;display:flex;align-items:center;justify-content:center;min-height:100vh}
@@ -66,9 +70,9 @@ button:hover{background:#33ff66;color:#000}
 </style></head><body>
 <form class="box" method="POST" action="${baseUrl}/login">
   <div class="hd">git-workers<span class="c">_</span></div>
-  <div class="sub">authenticate to browse repositories</div>
+  <div class="sub">${sub}</div>
   ${errHtml}
-  <input type="password" name="token" placeholder="token" autofocus>
-  <button type="submit">[ login ]</button>
+  <input type="password" name="token" placeholder="${L === "zh" ? "令牌" : "token"}" autofocus>
+  <button type="submit">${btn}</button>
 </form></body></html>`;
 }

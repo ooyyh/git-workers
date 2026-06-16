@@ -126,6 +126,8 @@ pre.blob img{max-width:100%}
 .navtabs a.active{color:var(--grn);border-bottom-color:var(--grn)}
 select.branchsel{background:#000;border:1px solid var(--line2);color:var(--grn);font-family:var(--mono);font-size:12px;padding:4px 8px;border-radius:0}
 .muted{color:var(--dim)}
+.langtoggle{color:var(--amb);padding:0 10px;font-size:12px;border-left:1px solid var(--line2);height:100%;display:flex;align-items:center;font-weight:700}
+.langtoggle:hover{color:var(--grn);text-decoration:none}
 hr{border:none;border-top:1px dashed var(--line2);margin:18px 0}
 `;
 
@@ -136,19 +138,31 @@ export interface LayoutOpts {
   isAuthenticated: boolean;
   authTokenConfigured: boolean;
   isAdmin?: boolean;
+  lang?: "zh" | "en";
   bodyInner: string;
 }
 
 export function renderPage(opts: LayoutOpts): string {
+  const lang = opts.lang ?? "zh";
+  const isZh = lang === "zh";
+  const reposLabel = isZh ? "~/仓库" : "~/repos";
+  const loginLabel = isZh ? "登录" : "login";
+  const logoutLabel = isZh ? "登出" : "logout";
+  const adminLabel = isZh ? "[ 管理面板 ]" : "[ admin ]";
+  const tagline = isZh ? "git-workers · 基于 Workers + 对象存储的 git 服务" : "git-workers · git-over-workers + object storage";
   const who = opts.authTokenConfigured
     ? opts.isAuthenticated
       ? `<span class="who">user@worker</span>`
-      : `<span class="who"><a href="/login">login</a></span>`
-    : `<span class="who" style="color:var(--dim2)">open</span>`;
-  const adminLink = opts.isAdmin ? `<a href="/admin">[ admin ]</a>` : "";
+      : `<span class="who"><a href="/login">${loginLabel}</a></span>`
+    : `<span class="who" style="color:var(--dim2)">${isZh ? "开放" : "open"}</span>`;
+  const logoutLink = opts.authTokenConfigured && opts.isAuthenticated ? ` <a href="/logout" style="color:var(--dim);font-size:12px">${logoutLabel}</a>` : "";
+  // language toggle: link to /setlang?l=<other> which sets cookie + redirects back
+  const otherLang = isZh ? "en" : "zh";
+  const langToggle = `<a class="langtoggle" href="/setlang?l=${otherLang}&to=${encodeURIComponent("/")}">${isZh ? "EN" : "中"}</a>`;
+  const adminLink = opts.isAdmin ? `<a href="/admin">${adminLabel}</a>` : "";
   const repoLink = opts.currentRepo ? `<a href="${opts.baseUrl}/${encodeURIComponent(opts.currentRepo)}">${escapeHtml(opts.currentRepo)}</a>` : "";
   return `<!doctype html>
-<html lang="en">
+<html lang="${lang}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -161,12 +175,14 @@ export function renderPage(opts: LayoutOpts): string {
     <div class="row">
       <div class="prompt">git-workers<span class="cur">_</span></div>
       <nav>
-        <a href="${opts.baseUrl}/">~/repos</a>
+        <a href="${opts.baseUrl}/">${reposLabel}</a>
         ${repoLink ? `<a href="${opts.baseUrl}/${encodeURIComponent(opts.currentRepo!)}">${escapeHtml(opts.currentRepo!)}</a>` : ""}
         ${adminLink}
       </nav>
       <div class="sp"></div>
+      ${langToggle}
       ${who}
+      ${logoutLink}
     </div>
   </div>
 </header>
@@ -174,8 +190,8 @@ export function renderPage(opts: LayoutOpts): string {
 ${opts.bodyInner}
 </main>
 <footer class="bar"><div class="wrap">
-  <span>git-workers · git-over-workers + object storage</span>
-  <span class="muted">${opts.isAdmin ? "DB mode" : ""}</span>
+  <span>${tagline}</span>
+  <span class="muted">${opts.isAdmin ? (isZh ? "数据库模式" : "DB mode") : ""}</span>
 </div></footer>
 <script>
 document.querySelectorAll('.term .cp').forEach(function(b){

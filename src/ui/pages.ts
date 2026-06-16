@@ -10,6 +10,7 @@ import { resolveRev, readTreeEntries, walkPath, parseActor, ResolvedRev } from "
 import { TreeEntry } from "../git/object";
 import { escapeHtml, escapePathSeg } from "./layout";
 import { renderMarkdown } from "./markdown";
+import { t, tf, Lang } from "./i18n";
 
 export interface UiContext {
   baseUrl: string;
@@ -18,6 +19,7 @@ export interface UiContext {
   workerOrigin: string;
   isAuthed: boolean;
   hasToken: boolean;
+  lang: Lang;
   /** D1 binding present (admin/DB mode). */
   hasDb?: boolean;
   /** Optional D1 (DB mode only) for listing registered repos. */
@@ -26,7 +28,7 @@ export interface UiContext {
 
 /** Dashboard: list all repos + backend status + clone instructions. */
 export async function renderDashboard(ctx: UiContext): Promise<string> {
-  // DB mode: list registered repos from D1. Env mode: scan storage for dirs.
+  const L = ctx.lang;
   let repoRows = "";
   let count = 0;
   if (ctx.hasDb && ctx.db) {
@@ -34,66 +36,67 @@ export async function renderDashboard(ctx: UiContext): Promise<string> {
     const repos = await listRepos(ctx.db);
     count = repos.length;
     repoRows = repos.length
-      ? `<table class="ls"><thead><tr><th>repo</th><th>storage</th><th>vis</th><th>updated</th></tr></thead><tbody>` +
+      ? `<table class="ls"><thead><tr><th>${t(L, "dash.col.repo")}</th><th>${t(L, "dash.col.storage")}</th><th>${t(L, "dash.col.vis")}</th><th>${t(L, "dash.col.updated")}</th></tr></thead><tbody>` +
         repos
           .map(
             (r: any) =>
               `<tr><td class="nm"><a href="${ctx.baseUrl}/${escapePathSeg(r.name)}">${escapeHtml(r.name)}</a></td>` +
               `<td class="meta">${escapeHtml(r.storageName ?? "-")}</td>` +
-              `<td>${r.visibility === "public" ? '<span class="tag pub">pub</span>' : '<span class="tag priv">priv</span>'}</td>` +
+              `<td>${r.visibility === "public" ? `<span class="tag pub">${t(L, "tag.pub")}</span>` : `<span class="tag priv">${t(L, "tag.priv")}</span>`}</td>` +
               `<td class="meta">${escapeHtml(r.updatedAt ?? "")}</td></tr>`,
           )
           .join("") +
         `</tbody></table>`
-      : `<div class="empty">[ no repos registered — add one in <a href="/admin">/admin</a> ]</div>`;
+      : `<div class="empty">${t(L, "dash.no.repos")}</div>`;
   } else {
     const repos = await listRepos(ctx.store, ctx.prefix);
     count = repos.length;
     repoRows = repos.length
-      ? `<table class="ls"><thead><tr><th>repo</th><th>status</th></tr></thead><tbody>` +
+      ? `<table class="ls"><thead><tr><th>${t(L, "dash.col.repo")}</th><th>${t(L, "dash.col.status")}</th></tr></thead><tbody>` +
         repos
           .map(
             (r) =>
               `<tr><td class="nm"><a href="${ctx.baseUrl}/${escapePathSeg(r.name)}">${escapeHtml(r.name)}</a></td>` +
-              `<td>${r.hasHead ? '<span class="tag ok">ok</span>' : '<span class="tag warn">no HEAD</span>'}</td></tr>`,
+              `<td>${r.hasHead ? `<span class="tag ok">${t(L, "tag.ok")}</span>` : `<span class="tag warn">${t(L, "tag.nohead")}</span>`}</td></tr>`,
           )
           .join("") +
         `</tbody></table>`
-      : `<div class="empty">[ no repositories found ]</div>`;
+      : `<div class="empty">${t(L, "dash.no.repos.env")}</div>`;
   }
 
   const cloneCmd = `git clone ${ctx.workerOrigin}/myrepo`;
   const authNote = ctx.hasToken
-    ? `<div class="notice">Auth token required. Configure git:<br><code>git config --global http.${ctx.workerOrigin}/.extraheader "Authorization: Bearer &lt;your-token&gt;"</code></div>`
-    : `<div class="notice">No AUTH_TOKEN set — anyone with the URL can read/push.</div>`;
+    ? `<div class="notice">${t(L, "dash.auth.note.token")}<br><code>git config --global http.${ctx.workerOrigin}/.extraheader "Authorization: Bearer &lt;your-token&gt;"</code></div>`
+    : `<div class="notice">${t(L, "dash.auth.note.open")}</div>`;
 
+  const modeLabel = ctx.hasDb ? t(L, "dash.count.db") : (escapeHtml(ctx.store?.kind ?? "?") + (L === "zh" ? " 后端" : " backend"));
   const dbNote = ctx.hasDb
-    ? `<div class="box"><div class="hd">storage / repos <span class="rt"><a href="/admin">[ admin ]</a></span></div><div class="bd">${repoRows}</div></div>`
-    : `<div class="box"><div class="hd">repos <span class="rt">${count} found · ${escapeHtml(ctx.store?.kind ?? "?")} backend</span></div><div class="bd">${repoRows}</div></div>`;
+    ? `<div class="box"><div class="hd">${t(L, "dash.storages")} / ${t(L, "dash.repos")} <span class="rt"><a href="/admin">${t(L, "nav.admin")}</a></span></div><div class="bd">${repoRows}</div></div>`
+    : `<div class="box"><div class="hd">${t(L, "dash.repos")} <span class="rt">${tf(L, "dash.repos.found", count, escapeHtml(ctx.store?.kind ?? "?"))}</span></div><div class="bd">${repoRows}</div></div>`;
 
   const pushHints = ctx.hasDb
-    ? `<div class="box"><div class="hd">create a repo</div><div class="bd">
-         <p class="muted">In DB mode, register the repo first in <a href="/admin">/admin → repos</a>, assigning it a storage backend. Then:</p>
+    ? `<div class="box"><div class="hd">${t(L, "dash.create")}</div><div class="bd">
+         <p class="muted">${t(L, "dash.create.db.hint")}</p>
          <div class="term" style="margin-top:8px"><div class="ln"><span class="p">$</span> <span class="cmd">git remote add origin <code>${escapeHtml(ctx.workerOrigin)}/myrepo</code></span></div>
          <div class="ln"><span class="p">$</span> <span class="cmd">git push -u origin main</span></div></div>
        </div></div>`
-    : `<div class="box"><div class="hd">create a repo</div><div class="bd">
+    : `<div class="box"><div class="hd">${t(L, "dash.create")}</div><div class="bd">
          <div class="term"><div class="ln"><span class="p">$</span> <span class="cmd">git init myrepo && cd myrepo</span></div>
          <div class="ln"><span class="p">$</span> <span class="cmd">git remote add origin <code>${escapeHtml(ctx.workerOrigin)}/myrepo</code></span></div>
          <div class="ln"><span class="p">$</span> <span class="cmd">git push -u origin main</span></div></div>
-         <p class="muted" style="margin-top:8px">A repo is created automatically on first push.</p>
+         <p class="muted" style="margin-top:8px">${t(L, "dash.create.env.hint")}</p>
        </div></div>`;
 
   const cloneBox = `<div class="term"><button class="cp" type="button">[copy]</button><div class="ln"><span class="p">$</span> <span class="cmd"><code>${escapeHtml(cloneCmd)}</code></span></div></div>`;
 
   return `
-    <h1>repositories</h1>
-    <div class="sub">${count} repo${count === 1 ? "" : "s"} · ${ctx.hasDb ? "DB mode" : escapeHtml(ctx.store?.kind ?? "?") + " backend"}</div>
+    <h1>${t(L, "dash.title")}</h1>
+    <div class="sub">${tf(L, "dash.count", count, modeLabel)}</div>
     ${authNote}
     ${dbNote}
     <div class="grid2">
       ${pushHints}
-      <div class="box"><div class="hd">clone anywhere</div><div class="bd">${cloneBox}<p class="muted" style="margin-top:10px">Then browse it in the UI.</p></div></div>
+      <div class="box"><div class="hd">${t(L, "dash.clone.anywhere")}</div><div class="bd">${cloneBox}<p class="muted" style="margin-top:10px">${t(L, "dash.clone.then")}</p></div></div>
     </div>
   `;
 }
@@ -169,7 +172,7 @@ export async function renderRepoHome(ctx: UiContext, repoName: string, repo: Rep
 
   const headLine = data.head
     ? `<span class="who">${escapeHtml(parseActor(data.head.authorLine).name)}</span> · ${escapeHtml(firstLine(data.head.message))} · <span class="sha">${data.head.sha.slice(0, 7)}</span>`
-    : `<span class="muted">no commits yet</span>`;
+    : `<span class="muted">${t(ctx.lang, "repo.no.commits")}</span>`;
 
   const readmeSection = data.readmeHtml
     ? `<div class="box"><div class="hd">README</div><div class="bd readme">${data.readmeHtml}</div></div>`
@@ -177,7 +180,7 @@ export async function renderRepoHome(ctx: UiContext, repoName: string, repo: Rep
 
   return `
     <h1>${escapeHtml(repoName)}</h1>
-    <div class="sub">${data.branches.length} branches · ${data.tags.length} tags</div>
+    <div class="sub">${tf(ctx.lang, "repo.branches.tags", data.branches.length, data.tags.length)}</div>
 
     <div class="term" style="margin-bottom:14px"><button class="cp" type="button">[copy]</button><div class="ln"><span class="p">$</span> <span class="cmd"><code>${escapeHtml(cloneUrl)}</code></span></div></div>
 
