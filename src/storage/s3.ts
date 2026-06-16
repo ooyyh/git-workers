@@ -223,11 +223,12 @@ export class S3Backend implements StorageBackend {
     };
 
     let res = await doPut(true);
-    // Some S3-compatible stores reject conditional headers with SignatureDoesNotMatch
-    // (their SigV4 impl mishandles If-Match/If-None-Match). Retry without the
-    // conditional header; we lose strict CAS but the write succeeds. CAS is
-    // best-effort here (single-writer repos are the common case).
-    if ((res.status === 403 || res.status === 400) && (opts.ifMatch || opts.ifNoneMatch)) {
+    // Some S3-compatible stores don't support conditional headers:
+    //   - SignatureDoesNotMatch (403/400) — their SigV4 mishandles If-Match/If-None-Match
+    //   - 501 NotImplemented — "A header you provided implies functionality not implemented"
+    // Retry without the conditional header; we lose strict CAS but the write
+    // succeeds. CAS is best-effort (single-writer repos are the common case).
+    if ((res.status === 403 || res.status === 400 || res.status === 501 || res.status === 502) && (opts.ifMatch || opts.ifNoneMatch)) {
       res = await doPut(false);
     }
 
