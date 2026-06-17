@@ -249,26 +249,21 @@ export async function handleUploadPackV2(
     const parts: Uint8Array[] = [];
     parts.push(pktLineStr("packfile\n"));
 
-    // Clone fast-path: no haves → if every want lives in ONE pack, forward that
-    // pack verbatim (1 subrequest) instead of reading N objects + rebuilding.
-    // This is the common `git clone` and keeps clone within the subrequest budget.
+    // Clone fast-path: no haves → forward the latest pack verbatim (1 subrequest,
+    // ~0 CPU — no parsing). We don't check which pack holds the want (that would
+    // require building the index = parsing the pack = blowing the free-tier CPU
+    // cap). For a single-pack repo this is complete; for multi-pack repos the
+    // latest pack holds HEAD and recent objects (older history may be missing —
+    // a known free-tier limitation; a full clone then needs the slow path, which
+    // requires a paid plan's higher CPU budget).
     let pack: Uint8Array | null = null;
     if (haveShas.length === 0 && wantShas.length > 0) {
-      const firstPack = await repo.findPackContaining(wantShas[0]);
-      if (firstPack) {
-        let allInSame = true;
-        for (const w of wantShas.slice(1)) {
-          if ((await repo.findPackContaining(w)) !== firstPack) {
-            allInSame = false;
-            break;
-          }
-        }
-        if (allInSame) {
-          try {
-            pack = await repo.readPackBytes(firstPack);
-          } catch {
-            pack = null;
-          }
+      const packs = await repo.listPacks();
+      if (packs.length > 0) {
+        try {
+          pack = await repo.readPackBytes(packs[packs.length - 1]);
+        } catch {
+          pack = null;
         }
       }
     }

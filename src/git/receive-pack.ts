@@ -111,14 +111,10 @@ export async function handleReceivePack(
     const packBytes = body.subarray(packOffset);
     if (packBytes.length >= 12) {
       try {
-        // Store the pack wholesale (1-2 subrequests) instead of one write per
-        // object. buildPackIndex parses + validates integrity + computes shas;
-        // storePack writes pack + index. This keeps push within Workers'
-        // subrequest budget regardless of object count.
-        const { objects } = await repo.storePack(packBytes);
-        // Also write any NEW objects as loose? No — they're in the pack and
-        // readObject() will find them via the index. Nothing else to do.
-        void objects;
+        // Store the pack wholesale WITHOUT parsing it (1 subrequest, ~0 CPU).
+        // Parsing at push time blows the free-tier CPU cap; the index is built
+        // lazily on first read. Ref shas come from the command line, not the pack.
+        await repo.storePack(packBytes);
       } catch (e) {
         unpackOk = false;
         unpackErr = e instanceof Error ? e.message : String(e);

@@ -42,10 +42,16 @@ export class Repo {
     return readStreamToBytes(stream);
   }
 
-  /** Find the pack sha whose index contains `sha`, or null. */
+  /** Find the pack sha whose index contains `sha`, or null.
+   *  Fast path: if there's exactly one pack, return it without building the
+   *  index (HEAD/commit always lives in the latest push's pack). Building the
+   *  index parses the whole pack and would blow the free-tier CPU cap. */
   async findPackContaining(sha: string): Promise<string | null> {
     if ((await this.store.head(this.objectKey(sha))) !== null) return null; // loose
-    for (const packSha of await this.listPacks()) {
+    const packs = await this.listPacks();
+    if (packs.length === 1) return packs[0];
+    // Multiple packs: need the index to locate which one holds the sha.
+    for (const packSha of packs) {
       const idx = await this.getPackIndex(packSha);
       if (idx?.entries[sha]) return packSha;
     }
@@ -156,37 +162,56 @@ export class Repo {
     return shas;
   }
 
-  /** Load a pack's index (cached). Returns null if not found. */
+  /** Load a pack's index (cached). Builds it lazily from the pack if the index
+   *  file is missing (push stores packs without parsing, to stay within CPU).
+   *  Note: building requires parsing the whole pack — may approach the CPU cap
+   *  on large packs; clone forwards packs verbatim and avoids this. */
   async getPackIndex(packSha: string): Promise<PackIndex | null> {
-    if (this.packIndexCache.has(packSha)) return this.packIndexCache.get(packSha) ?? null;
+    const cached = this.packIndexCache.get(packSha);
+    if (cached) return cached;
+    // Try the stored index file first.
     const stream = await this.store.get(this.idxKey(packSha));
-    let idx: PackIndex | null = null;
     if (stream) {
       try {
-        idx = JSON.parse(new TextDecoder().decode(await readStreamToBytes(stream))) as PackIndex;
+        const idx = JSON.parse(new TextDecoder().decode(await readStreamToBytes(stream))) as PackIndex;
+        this.packIndexCache.set(packSha, idx);
+        return idx;
       } catch {
-        idx = null;
+        /* fall through to build */
       }
     }
-    this.packIndexCache.set(packSha, idx);
-    return idx;
+    // Lazily build the index from the pack file.
+    try {
+      const packBytes = await this.readPackBytes(packSha);
+      const { index } = await buildPackIndex(packBytes);
+      // Persist the index for next time (best-effort).
+      try {
+        await this.store.put(this.idxKey(packSha), new TextEncoder().encode(JSON.stringify(index)));
+      } catch {
+        /* ignore */
+      }
+      this.packIndexCache.set(packSha, index);
+      return index;
+    } catch {
+      return null;
+    }
   }
 
   /**
-   * Store a complete packfile + its index in ONE operation each (2 subrequests),
-   * instead of one write per object. Returns the map of resolved objects.
+   * Store a packfile WITHOUT parsing it (1 subrequest, ~0 CPU). The pack's sha
+   * is read from its 20-byte trailer. The index is built lazily on first read
+   * (getPackIndex) — building it at push time blows the free-tier 10ms CPU cap.
+   * Clone (the common read) forwards the pack verbatim and never needs an index.
    */
-  async storePack(packBytes: Uint8Array): Promise<{ packSha: string; objects: Map<string, { sha: string; type: ObjectType; content: Uint8Array }> }> {
-    const { index, objects } = await buildPackIndex(packBytes);
-    const packSha = index.packSha;
-    // Store pack (overwrite-if-same is fine; ifNoneMatch would block re-push).
+  async storePack(packBytes: Uint8Array): Promise<{ packSha: string }> {
+    // pack trailer = last 20 bytes = SHA-1 of the pack body (= pack filename).
+    const trailer = packBytes.subarray(packBytes.length - 20);
+    const packSha = [...trailer].map((b) => b.toString(16).padStart(2, "0")).join("");
     await this.store.put(this.packKey(packSha), packBytes);
-    // Store index JSON.
-    await this.store.put(this.idxKey(packSha), new TextEncoder().encode(JSON.stringify(index)));
-    this.packIndexCache.set(packSha, index);
-    return { packSha, objects };
+    // Mark index as "not yet built" so getPackIndex builds it lazily on demand.
+    this.packIndexCache.set(packSha, null);
+    return { packSha };
   }
-
 
   /**
    * Write an object, returning its sha. Verifies the content hashes to the
