@@ -18,8 +18,14 @@ import { StorageBackend } from "../storage/types";
 import { deflate, gitHash, inflate, readStreamToBytes } from "./crypto";
 import { GitObject, ObjectType, objectBytes, parseObject, PACK_TYPE_ID } from "./object";
 import { buildPackIndex, PackIndex, applyDelta, inflateOne } from "./pack";
+import { getPackObjectBySha } from "../db";
 
 export class Repo {
+  /** Optional D1 binding — when set, readObject consults the pack_object_index
+   *  table (built asynchronously by the Queue indexer) for O(1) sha→offset
+   *  lookup, avoiding a full-pack scan that would blow the free-tier CPU cap. */
+  db: any = null;
+
   constructor(
     public readonly name: string,
     private store: StorageBackend,
@@ -73,6 +79,25 @@ export class Repo {
   async readObject(sha: string): Promise<GitObject> {
     // 0. request-level cache (objects already scanned out of a pack this request)
     if (this.objectCache.has(sha)) return this.objectCache.get(sha)!;
+    // 0.5 D1 pack_object_index (built async by the Queue indexer) — O(1) sha→offset,
+    //    1 Range subrequest, ~0 CPU. This is the path that keeps large repos
+    //    within the free-tier 10ms cap (full-pack scans blow it).
+    if (this.db) {
+      try {
+        const entry = await getPackObjectBySha(this.db, this.name, sha);
+        if (entry) {
+          const objStream = await this.store.get(this.packKey(entry.packSha), { start: entry.offset, endExclusive: entry.endOffset });
+          if (objStream) {
+            const objBytes = await readStreamToBytes(objStream);
+            const obj = await this.resolvePackedTypeWithDb(entry.packSha, entry.offset, objBytes, entry.type as ObjectType);
+            this.objectCache.set(sha, obj);
+            return obj;
+          }
+        }
+      } catch {
+        /* D1 lookup failed — fall through to other paths */
+      }
+    }
     // 1. loose
     const stream = await this.store.get(this.objectKey(sha));
     if (stream) {
@@ -183,6 +208,63 @@ export class Repo {
     if (!typeName) throw new Error(`unknown pack type id: ${rawType}`);
     const { out: content } = inflateOne(slice, pos);
     return { type: typeName, content };
+  }
+
+  /** Resolve a packed object using D1 index for delta base lookups (avoids the
+   *  full-pack scan in readPackedAt). `knownType` is the resolved type from the
+   *  D1 index (already delta-resolved by the indexer). */
+  private async resolvePackedTypeWithDb(packSha: string, offset: number, slice: Uint8Array, knownType: ObjectType): Promise<GitObject> {
+    let pos = 0;
+    const first = slice[pos++];
+    const rawType = (first >> 4) & 0x07;
+    if (first & 0x80) {
+      while (slice[pos++] & 0x80) {}
+    }
+    if (rawType === 6) {
+      // OFS_DELTA: read offset varint, inflate delta, recurse for base via D1.
+      let b = slice[pos++];
+      let ofs = b & 0x7f;
+      while (b & 0x80) {
+        b = slice[pos++];
+        ofs = ((ofs + 1) << 7) | (b & 0x7f);
+      }
+      const { out: delta } = inflateOne(slice, pos);
+      const baseOffset = offset - ofs;
+      const base = await this.readPackedAtWithDb(packSha, baseOffset);
+      return { type: knownType, content: applyDelta(base.content, delta) };
+    }
+    if (rawType === 7) {
+      throw new Error("REF_DELTA in stored pack unsupported");
+    }
+    // base object — inflate directly, type known from D1.
+    const { out: content } = inflateOne(slice, pos);
+    return { type: knownType, content };
+  }
+
+  /** Read a packed object at an offset using D1 index for the byte range +
+   *  delta base type. Used by resolvePackedTypeWithDb for OFS_DELTA bases. */
+  private async readPackedAtWithDb(packSha: string, offset: number): Promise<GitObject> {
+    // Look up the base's end offset + resolved type in D1 (by offset).
+    let endOffset = offset + 65536;
+    let knownType: ObjectType | null = null;
+    if (this.db) {
+      try {
+        const { getPackObjectByOffset } = await import("../db");
+        const baseEntry = await getPackObjectByOffset(this.db, this.name, packSha, offset);
+        if (baseEntry) {
+          endOffset = baseEntry.endOffset;
+          knownType = baseEntry.type as ObjectType;
+        }
+      } catch { /* ignore */ }
+    }
+    const stream = await this.store.get(this.packKey(packSha), { start: offset, endExclusive: endOffset });
+    if (!stream) throw new Error("pack range read failed");
+    const slice = await readStreamToBytes(stream);
+    if (knownType) {
+      return this.resolvePackedTypeWithDb(packSha, offset, slice, knownType);
+    }
+    // No D1 entry — fall back to the scan-free resolver (may fail on deltas).
+    return this.resolvePackedType(packSha, offset, slice);
   }
 
   /** Read a packed object at an absolute pack offset (recurses for delta bases). */
