@@ -77,23 +77,57 @@ export class Repo {
       const compressed = await readStreamToBytes(stream);
       return parseObject(await inflate(compressed));
     }
-    // 2. packs (by index)
+    // 2. packs — try a built index first (fast Range read), else stream-scan
+    //    the pack for this one sha (avoids building a full index, which would
+    //    blow the free-tier CPU cap on large packs).
     for (const packSha of await this.listPacks()) {
-      const idx = await this.getPackIndex(packSha);
-      if (!idx) continue;
-      const entry = idx.entries[sha];
-      if (!entry) continue;
-      // Range-read just this object's compressed bytes from the pack.
-      const objStream = await this.store.get(this.packKey(packSha), {
-        start: entry.offset,
-        endExclusive: entry.endOffset,
-      });
-      if (!objStream) continue;
-      const objBytes = await readStreamToBytes(objStream);
-      const type = await this.resolvePackedType(packSha, entry.offset, objBytes);
-      return type;
+      const idx = await this.getPackIndexIfExists(packSha);
+      if (idx?.entries[sha]) {
+        const entry = idx.entries[sha];
+        const objStream = await this.store.get(this.packKey(packSha), { start: entry.offset, endExclusive: entry.endOffset });
+        if (objStream) {
+          const objBytes = await readStreamToBytes(objStream);
+          try {
+            return await this.resolvePackedType(packSha, entry.offset, objBytes);
+          } catch {
+            /* fall through to scan */
+          }
+        }
+      }
+      // Stream-scan: read the pack, inflate objects one by one, return on sha match.
+      const found = await this.scanPackFor(packSha, sha);
+      if (found) return found;
     }
     throw new Error(`object not found: ${sha}`);
+  }
+
+  /** Get a pack index only if already built (file or cache); never builds. */
+  async getPackIndexIfExists(packSha: string): Promise<PackIndex | null> {
+    const cached = this.packIndexCache.get(packSha);
+    if (cached) return cached;
+    const stream = await this.store.get(this.idxKey(packSha));
+    if (stream) {
+      try {
+        const idx = JSON.parse(new TextDecoder().decode(await readStreamToBytes(stream))) as PackIndex;
+        this.packIndexCache.set(packSha, idx);
+        return idx;
+      } catch { /* ignore */ }
+    }
+    return null;
+  }
+
+  /** Stream-scan a pack for a single object by sha, returning on first match.
+   *  Does NOT build a full index — only inflates objects until the target is found. */
+  async scanPackFor(packSha: string, targetSha: string): Promise<GitObject | null> {
+    let packBytes: Uint8Array;
+    try {
+      packBytes = await this.readPackBytes(packSha);
+    } catch {
+      return null;
+    }
+    const { scanPackForObject } = await import("./pack");
+    const found = await scanPackForObject(packBytes, targetSha);
+    return found;
   }
 
   /** Resolve a packed object's type+content from its sliced bytes (handles deltas). */

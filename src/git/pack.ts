@@ -299,17 +299,12 @@ export interface PackIndex {
 }
 
 /**
- * Build a pack index WITHOUT fully resolving/decompressing every object's content.
- * We only need: each object's [offset, endOffset) and type. Deltas are resolved
- * only to compute their sha (so the index is keyed by sha). Cheaper than parsePack
- * since non-delta objects aren't hash-recomputed for storage (content stays in pack).
- *
- * Returns { index, objects } where objects is the fully-resolved map (reused for
- * sha computation + integrity check during push).
+ * Build a pack index in a SINGLE pass: inflate each object once, compute its
+ * sha, resolve deltas — no second inflate (the old version called parsePack
+ * which re-inflated everything). This halves the CPU, critical for the free-tier
+ * 10ms cap. Returns the index (sha → byte range) + resolved objects.
  */
 export async function buildPackIndex(pack: Uint8Array): Promise<{ index: PackIndex; objects: Map<string, ParsedPackObject> }> {
-  // Reuse parsePack to get resolved objects (sha, type, content) + their byte ranges.
-  // parsePack already walks offsets; we re-derive endOffset from the next object.
   const reader = new ByteReader(pack);
   const magic = new TextDecoder().decode(reader.bytes(4));
   if (magic !== "PACK") throw new Error(`invalid pack magic: ${magic}`);
@@ -317,39 +312,140 @@ export async function buildPackIndex(pack: Uint8Array): Promise<{ index: PackInd
   if (version !== 2) throw new Error(`unsupported pack version: ${version}`);
   const count = reader.uint32BE();
 
-  // First pass: record each object's start offset + type + compressed length.
-  interface Layout { offset: number; endOffset: number; type: number }
-  const layouts: Layout[] = [];
+  interface Raw { offset: number; endOffset: number; type: number; content: Uint8Array; ofsDelta?: number; refDelta?: string }
+  const raws: Raw[] = [];
+  const offsetToIdx = new Map<number, number>();
   for (let i = 0; i < count; i++) {
     const objStart = reader.pos;
     const { type } = reader.readTypeAndSize();
+    let ofsDelta: number | undefined;
+    let refDelta: string | undefined;
     if (type === 6) {
-      reader.readOffset(); // ofs
+      ofsDelta = reader.readOffset();
     } else if (type === 7) {
-      reader.bytes(20); // base sha
+      const b = reader.bytes(20);
+      refDelta = [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
     }
-    const { consumed } = inflateOne(pack, reader.pos);
+    const { out, consumed } = inflateOne(pack, reader.pos);
     reader.pos += consumed;
-    layouts.push({ offset: objStart, endOffset: reader.pos, type });
+    raws.push({ offset: objStart, endOffset: reader.pos, type, content: out, ofsDelta, refDelta });
+    offsetToIdx.set(objStart, i);
   }
-  // Trailer = last 20 bytes (SHA-1 of pack body).
   const trailer = pack.subarray(pack.length - 20, pack.length);
   const packSha = [...trailer].map((b) => b.toString(16).padStart(2, "0")).join("");
 
-  // Resolve objects (for sha + integrity) via parsePack.
-  const objects = await parsePack(pack);
+  // Resolve deltas + compute shas (memoized).
+  const resolved = new Map<number, { type: ObjectType; content: Uint8Array; sha: string }>();
+  async function resolve(idx: number): Promise<{ type: ObjectType; content: Uint8Array; sha: string }> {
+    const cached = resolved.get(idx);
+    if (cached) return cached;
+    const raw = raws[idx];
+    let result: { type: ObjectType; content: Uint8Array; sha: string };
+    if (raw.type === 6) {
+      const baseOffset = raw.offset - raw.ofsDelta!;
+      const baseIdx = offsetToIdx.get(baseOffset);
+      if (baseIdx === undefined) throw new Error(`OFS_DELTA base not found at ${baseOffset}`);
+      const base = await resolve(baseIdx);
+      const content = applyDelta(base.content, raw.content);
+      result = { type: base.type, content, sha: await gitHash(base.type, content) };
+    } else if (raw.type === 7) {
+      const baseSha = raw.refDelta!;
+      let base: { type: ObjectType; content: Uint8Array } | undefined;
+      for (const [, r] of resolved) {
+        if (r.sha === baseSha) { base = r; break; }
+      }
+      if (!base) {
+        for (let j = 0; j < raws.length; j++) {
+          if (j === idx || resolved.has(j)) continue;
+          try {
+            const r = await resolve(j);
+            if (r.sha === baseSha) { base = r; break; }
+          } catch { /* not yet */ }
+        }
+      }
+      if (!base) throw new Error(`REF_DELTA base ${baseSha} not found`);
+      const content = applyDelta(base.content, raw.content);
+      result = { type: base.type, content, sha: await gitHash(base.type, content) };
+    } else {
+      const typeName = PACK_TYPE_ID[raw.type];
+      if (!typeName) throw new Error(`unknown pack type id: ${raw.type}`);
+      result = { type: typeName, content: raw.content, sha: await gitHash(typeName, raw.content) };
+    }
+    resolved.set(idx, result);
+    return result;
+  }
 
   const entries: Record<string, PackIndexEntry> = {};
-  const shas = [...objects.keys()];
-  // objects Map iteration order matches parsePack order = layouts order (same i).
-  shas.forEach((sha, i) => {
-    const lay = layouts[i];
-    if (!lay) return;
-    const obj = objects.get(sha)!;
-    entries[sha] = { offset: lay.offset, endOffset: lay.endOffset, type: TYPE_ID[obj.type] };
-  });
-
+  const objects = new Map<string, ParsedPackObject>();
+  for (let i = 0; i < raws.length; i++) {
+    const r = await resolve(i);
+    entries[r.sha] = { offset: raws[i].offset, endOffset: raws[i].endOffset, type: TYPE_ID[r.type] };
+    objects.set(r.sha, { sha: r.sha, type: r.type, content: r.content });
+  }
   return { index: { packSha, entries }, objects };
+}
+
+/**
+ * Stream-scan a pack for a SINGLE object by sha, returning on first match.
+ * Inflates objects one at a time (computing each sha) until the target is found
+ * — does NOT build a full index, so it stays within the free-tier CPU cap as
+ * long as the target is near the front (git packs put commits first, so HEAD
+ * commits/trees are found quickly). Deltas are resolved on demand.
+ */
+export async function scanPackForObject(pack: Uint8Array, targetSha: string): Promise<{ type: ObjectType; content: Uint8Array } | null> {
+  const reader = new ByteReader(pack);
+  const magic = new TextDecoder().decode(reader.bytes(4));
+  if (magic !== "PACK") return null;
+  reader.uint32BE(); // version
+  const count = reader.uint32BE();
+
+  // We may need to resolve a delta whose base is earlier in the pack; keep a
+  // cache of resolved objects by offset as we go.
+  const resolvedByOffset = new Map<number, { type: ObjectType; content: Uint8Array; sha: string }>();
+
+  for (let i = 0; i < count; i++) {
+    const objStart = reader.pos;
+    const { type } = reader.readTypeAndSize();
+    let baseContent: { type: ObjectType; content: Uint8Array } | undefined;
+    if (type === 6) {
+      const ofs = reader.readOffset();
+      const baseOffset = objStart - ofs;
+      baseContent = resolvedByOffset.get(baseOffset);
+      if (!baseContent) {
+        // base not yet resolved (shouldn't happen — bases come before deltas);
+        // skip this object by consuming its compressed bytes.
+        const { consumed } = inflateOne(pack, reader.pos);
+        reader.pos += consumed;
+        continue;
+      }
+    } else if (type === 7) {
+      // REF_DELTA: would need sha lookup; rare in pushed packs. Skip (consume).
+      reader.bytes(20);
+      const { consumed } = inflateOne(pack, reader.pos);
+      reader.pos += consumed;
+      continue;
+    }
+    const { out, consumed } = inflateOne(pack, reader.pos);
+    reader.pos += consumed;
+
+    let resultType: ObjectType;
+    let resultContent: Uint8Array;
+    if (type === 6 && baseContent) {
+      resultType = baseContent.type;
+      resultContent = applyDelta(baseContent.content, out);
+    } else {
+      const typeName = PACK_TYPE_ID[type];
+      if (!typeName) continue;
+      resultType = typeName;
+      resultContent = out;
+    }
+    const sha = await gitHash(resultType, resultContent);
+    resolvedByOffset.set(objStart, { type: resultType, content: resultContent, sha });
+    if (sha === targetSha) {
+      return { type: resultType, content: resultContent };
+    }
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
