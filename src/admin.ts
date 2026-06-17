@@ -72,6 +72,7 @@ export async function handleAdmin(request: Request, env: Env): Promise<Response>
   if (path === "/storages" && request.method === "POST") return createStorageHandler(request, env, lang);
   if (path === "/storages/test" && request.method === "POST") return testConnectionHandler(request);
   if (path === "/diag" && request.method === "GET") return diagHandler(env, url);
+  if (path === "/list" && request.method === "GET") return listHandler(env, url);
   const sEdit = path.match(/^\/storages\/(\d+)\/edit$/) && request.method === "POST";
   if (sEdit) return updateStorageHandler(request, env, parseInt(RegExp.$1, 10));
   const sDel = path.match(/^\/storages\/(\d+)\/delete$/) && request.method === "POST";
@@ -375,6 +376,32 @@ async function diagHandler(env: Env, url: URL): Promise<Response> {
   try {
     const r = await (backend as any).diagGet(key, range);
     return json(r);
+  } catch (e) {
+    return json({ error: errMsg(e) });
+  }
+}
+
+/** List a prefix on the first storage (admin diag). ?key=<prefix> */
+async function listHandler(env: Env, url: URL): Promise<Response> {
+  const prefix = url.searchParams.get("key") || "";
+  const storages = await listStorages(env.DB, env.CONFIG_KEY);
+  if (!storages.length) return json({ error: "no storages" });
+  const s = storages[0];
+  const { createBackendFromSpec } = await import("./storage");
+  const backend = createBackendFromSpec({
+    kind: s.kind,
+    endpoint: s.config.endpoint ?? "",
+    region: s.config.region,
+    bucket: s.config.bucket,
+    basePath: s.config.basePath,
+    accessKeyId: s.creds.accessKeyId,
+    secretAccessKey: s.creds.secretAccessKey,
+    username: s.creds.username,
+    password: s.creds.password,
+  });
+  try {
+    const entries = await backend.list(prefix);
+    return json({ count: entries.length, entries: entries.map((e: any) => ({ key: e.key, size: e.size, dir: e.isDirectory })) });
   } catch (e) {
     return json({ error: errMsg(e) });
   }

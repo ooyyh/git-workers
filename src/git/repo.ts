@@ -71,16 +71,19 @@ export class Repo {
 
   /** Read an object (loose first, then packs). @throws if missing. */
   async readObject(sha: string): Promise<GitObject> {
+    // 0. request-level cache (objects already scanned out of a pack this request)
+    if (this.objectCache.has(sha)) return this.objectCache.get(sha)!;
     // 1. loose
     const stream = await this.store.get(this.objectKey(sha));
     if (stream) {
       const compressed = await readStreamToBytes(stream);
-      return parseObject(await inflate(compressed));
+      const obj = parseObject(await inflate(compressed));
+      this.objectCache.set(sha, obj);
+      return obj;
     }
-    // 2. packs — try a built index first (fast Range read), else stream-scan
-    //    the pack for this one sha (avoids building a full index, which would
-    //    blow the free-tier CPU cap on large packs).
-    for (const packSha of await this.listPacks()) {
+    // 2. packs — try built indexes first (fast Range read, no scanning).
+    const packs = await this.listPacks();
+    for (const packSha of packs) {
       const idx = await this.getPackIndexIfExists(packSha);
       if (idx?.entries[sha]) {
         const entry = idx.entries[sha];
@@ -88,14 +91,21 @@ export class Repo {
         if (objStream) {
           const objBytes = await readStreamToBytes(objStream);
           try {
-            return await this.resolvePackedType(packSha, entry.offset, objBytes);
+            const obj = await this.resolvePackedType(packSha, entry.offset, objBytes);
+            this.objectCache.set(sha, obj);
+            return obj;
           } catch {
             /* fall through to scan */
           }
         }
       }
-      // Stream-scan: read the pack, inflate objects one by one, return on sha match.
-      const found = await this.scanPackFor(packSha, sha);
+    }
+    // 3. No index hit — stream-scan ONLY the latest pack (scanning every pack
+    //    for a missing index multiplies CPU and blows the free-tier cap). The
+    //    latest pack holds HEAD and recent objects; older objects need an index
+    //    (built lazily on demand elsewhere) or a paid plan.
+    if (packs.length > 0) {
+      const found = await this.scanPackFor(packs[packs.length - 1], sha);
       if (found) return found;
     }
     throw new Error(`object not found: ${sha}`);
@@ -116,17 +126,28 @@ export class Repo {
     return null;
   }
 
-  /** Stream-scan a pack for a single object by sha, returning on first match.
-   *  Does NOT build a full index — only inflates objects until the target is found. */
+  /** Per-request cache of objects scanned out of a pack (keyed by sha).
+   *  Avoids re-scanning the same pack for objects already seen this request. */
+  private objectCache = new Map<string, GitObject>();
+  /** Per-request cache of full pack bytes (avoid re-reading the same pack). */
+  private packBytesCache = new Map<string, Uint8Array>();
+
+  /** Stream-scan a pack for a single object by sha. Caches every object it
+   *  inflates along the way, so subsequent readObject() calls for objects near
+   *  the front hit the cache without re-scanning. */
   async scanPackFor(packSha: string, targetSha: string): Promise<GitObject | null> {
-    let packBytes: Uint8Array;
-    try {
-      packBytes = await this.readPackBytes(packSha);
-    } catch {
-      return null;
+    if (this.objectCache.has(targetSha)) return this.objectCache.get(targetSha)!;
+    let packBytes = this.packBytesCache.get(packSha);
+    if (!packBytes) {
+      try {
+        packBytes = await this.readPackBytes(packSha);
+      } catch {
+        return null;
+      }
+      this.packBytesCache.set(packSha, packBytes);
     }
     const { scanPackForObject } = await import("./pack");
-    const found = await scanPackForObject(packBytes, targetSha);
+    const found = await scanPackForObject(packBytes, targetSha, this.objectCache);
     return found;
   }
 

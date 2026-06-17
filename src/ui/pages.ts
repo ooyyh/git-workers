@@ -9,9 +9,7 @@ import { listRepos } from "./repos";
 import { resolveRev, readTreeEntries, walkPath, parseActor, ResolvedRev } from "../git/rev";
 import { TreeEntry } from "../git/object";
 import { escapeHtml, escapePathSeg } from "./layout";
-import { renderMarkdown } from "./markdown";
 import { t, tf, Lang, Theme } from "./i18n";
-
 export interface UiContext {
   baseUrl: string;
   store: StorageBackend;
@@ -133,16 +131,9 @@ async function gatherRepoHome(repo: Repo, refs: RefStore): Promise<RepoHomeData>
       const treeObj = await repo.readObject(headRev.commit.tree);
       if (treeObj.type === "tree") {
         entries = parseTreeSafe(treeObj.content);
-        const readme = entries.find((e) => /^readme(\.|$)/i.test(e.name) && !e.isDir);
-        if (readme) {
-          try {
-            const blob = await repo.readObject(readme.sha);
-            const text = new TextDecoder().decode(blob.content);
-            readmeHtml = renderMarkdown(text);
-          } catch {
-            /* ignore */
-          }
-        }
+        // README rendering deferred to the file view (reading the blob here means
+        // another pack scan, which on large packs blows the free-tier CPU cap).
+        // Keep entries (file list) only.
       }
     }
   }

@@ -392,15 +392,19 @@ export async function buildPackIndex(pack: Uint8Array): Promise<{ index: PackInd
  * long as the target is near the front (git packs put commits first, so HEAD
  * commits/trees are found quickly). Deltas are resolved on demand.
  */
-export async function scanPackForObject(pack: Uint8Array, targetSha: string): Promise<{ type: ObjectType; content: Uint8Array } | null> {
+export async function scanPackForObject(
+  pack: Uint8Array,
+  targetSha: string,
+  cache?: Map<string, { type: ObjectType; content: Uint8Array }>,
+): Promise<{ type: ObjectType; content: Uint8Array } | null> {
+  if (cache?.has(targetSha)) return cache.get(targetSha)!;
   const reader = new ByteReader(pack);
   const magic = new TextDecoder().decode(reader.bytes(4));
   if (magic !== "PACK") return null;
   reader.uint32BE(); // version
   const count = reader.uint32BE();
 
-  // We may need to resolve a delta whose base is earlier in the pack; keep a
-  // cache of resolved objects by offset as we go.
+  // Cache of resolved objects by offset (for delta base lookups within this scan).
   const resolvedByOffset = new Map<number, { type: ObjectType; content: Uint8Array; sha: string }>();
 
   for (let i = 0; i < count; i++) {
@@ -412,14 +416,11 @@ export async function scanPackForObject(pack: Uint8Array, targetSha: string): Pr
       const baseOffset = objStart - ofs;
       baseContent = resolvedByOffset.get(baseOffset);
       if (!baseContent) {
-        // base not yet resolved (shouldn't happen — bases come before deltas);
-        // skip this object by consuming its compressed bytes.
         const { consumed } = inflateOne(pack, reader.pos);
         reader.pos += consumed;
         continue;
       }
     } else if (type === 7) {
-      // REF_DELTA: would need sha lookup; rare in pushed packs. Skip (consume).
       reader.bytes(20);
       const { consumed } = inflateOne(pack, reader.pos);
       reader.pos += consumed;
@@ -441,6 +442,7 @@ export async function scanPackForObject(pack: Uint8Array, targetSha: string): Pr
     }
     const sha = await gitHash(resultType, resultContent);
     resolvedByOffset.set(objStart, { type: resultType, content: resultContent, sha });
+    cache?.set(sha, { type: resultType, content: resultContent });
     if (sha === targetSha) {
       return { type: resultType, content: resultContent };
     }
