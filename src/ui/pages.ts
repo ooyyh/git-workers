@@ -189,7 +189,7 @@ export async function renderRepoHome(ctx: UiContext, repoName: string, repo: Rep
     <div class="term" style="margin-bottom:14px"><button class="cp" type="button">[copy]</button><div class="ln"><span class="p">$</span> <span class="cmd"><code>${escapeHtml(cloneUrl)}</code></span></div></div>
 
     <div class="box">
-      <div class="hd">${data.branches.length ? `<select class="branchsel" onchange="var b=this.value;if(b)location.href='${ctx.baseUrl}/${escapePathSeg(repoName)}/tree/'+encodeURIComponent(b)">${branchOptions}</select>` : "tree"} <span class="rt">${escapeHtml(headLine)}</span></div>
+      <div class="hd">${data.branches.length ? `<select class="branchsel" onchange="var b=this.value;if(b)location.href='${ctx.baseUrl}/${escapePathSeg(repoName)}/tree/'+encodeURIComponent(b)">${branchOptions}</select>` : "tree"} <span class="rt">${headLine}</span></div>
       <div class="bd" style="padding:0">
         <table class="ls"><tbody>${fileRows}</tbody></table>
       </div>

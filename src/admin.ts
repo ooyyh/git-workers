@@ -193,13 +193,13 @@ async function renderStoragesPage(env: Env, L: Lang, Th: Theme): Promise<string>
         var f=document.querySelector('form[action="/admin/storages"]');
         var fd=new FormData(f); fd.delete('name');
         var btn=document.getElementById('testBtn'); var res=document.getElementById('testResult');
-        btn.disabled=true; res.textContent=L==='zh'?'测试中…':'testing...'; res.style.color='var(--amb)';
+        btn.disabled=true; res.textContent=L==='zh'?'测试中…':'testing...'; res.style.color='var(--dim)';
         try{
           var r=await fetch('/admin/storages/test',{method:'POST',body:fd});
           var j=await r.json();
           res.textContent=(j.ok?'[OK] ':'[ERR] ')+j.message+' ('+j.ms+'ms)';
-          res.style.color=j.ok?'var(--grn)':'var(--red)';
-        }catch(e){res.textContent='[ERR] '+e;res.style.color='var(--red)';}
+          res.style.color=j.ok?'var(--ok-text)':'var(--error-text)';
+        }catch(e){res.textContent='[ERR] '+e;res.style.color='var(--error-text)';}
         btn.disabled=false;
       }
       </script>
