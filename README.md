@@ -210,3 +210,4 @@ Working reference implementation. The git smart-HTTP protocol layer (upload-pack
 ## License
 
 ISC. SigV4 and WebDAV client logic adapted from [clist](https://github.com/ooyyh/clist) (MIT).
+
