@@ -31,16 +31,18 @@ import { Repo } from "./git/repo";
 import { RefStore } from "./git/refs";
 import { buildInfoRefsResponse, buildV2InfoRefsResponse, handleUploadPack, handleUploadPackV2, isV2 } from "./git/upload-pack";
 import { buildReceiveInfoRefsResponse, handleReceivePack } from "./git/receive-pack";
+import { processPackIndexMessage, PackIndexMessage } from "./git/indexer";
 import { renderPage } from "./ui/layout";
 import { renderDashboard, renderRepoHome, renderTreePath, serveRaw, UiContext } from "./ui/pages";
-import { sessionForToken, setSessionCookie, clearSessionCookie, isUiAuthed, renderLoginPage } from "./ui/auth";
+import { sessionForToken, setSessionCookie, clearSessionCookie, isUiAuthed, renderLoginPage, renderRegisterPage } from "./ui/auth";
+import { authenticateUser, clearUserSessionCookie, gitBasicUser, registrationAllowed, registerUser, sessionCookieForUser, userFromSession } from "./auth/users";
 import { detectLang, detectTheme } from "./ui/i18n";
 import { handleAdmin, ADMIN_COOKIE } from "./admin";
 
 export { Repo };
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
     const baseUrl = "";
@@ -76,22 +78,30 @@ export default {
         if (hasDb(env)) await initDb(env.DB);
         const ctx = await uiContext(request, env, url);
         const body = await renderDashboard(ctx);
-        return html(renderPage({ title: ctx.lang === "zh" ? "仓库 · git-workers" : "Repositories · git-workers", baseUrl, isAuthenticated: ctx.isAuthed, authTokenConfigured: ctx.hasToken, isAdmin: isAdminAuthed(request, env), lang: ctx.lang, theme: ctx.theme, bodyInner: body }));
+        return html(renderPage({ title: ctx.lang === "zh" ? "仓库 · git-workers" : "Repositories · git-workers", baseUrl, isAuthenticated: ctx.isAuthed, authTokenConfigured: ctx.hasToken, isAdmin: await isAdminAuthed(request, env), lang: ctx.lang, theme: ctx.theme, bodyInner: body }));
       });
     }
 
     if (path === "/login") {
       if (request.method === "GET") {
         const ll = detectLang(request.headers.get("Cookie"));
-        return new Response(renderLoginPage(baseUrl, false, ll), { headers: { "Content-Type": "text/html; charset=utf-8" } });
+        const userMode = hasDb(env);
+        return new Response(renderLoginPage(baseUrl, false, ll, { userMode, allowRegister: userMode ? await registrationAllowed(env) : false }), { headers: { "Content-Type": "text/html; charset=utf-8" } });
       }
       if (request.method === "POST") {
         return await handleLogin(request, env);
       }
     }
 
+    if (path === "/register" && hasDb(env)) {
+      const ll = detectLang(request.headers.get("Cookie"));
+      if (!(await registrationAllowed(env))) return new Response("Registration is closed\n", { status: 403 });
+      if (request.method === "GET") return new Response(renderRegisterPage(baseUrl, null, ll), { headers: { "Content-Type": "text/html; charset=utf-8" } });
+      if (request.method === "POST") return handleRegister(request, env);
+    }
+
     if (path === "/logout") {
-      return new Response(redirect("/"), { status: 302, headers: { Location: "/", "Set-Cookie": clearSessionCookie() } });
+      return new Response(redirect("/"), { status: 302, headers: { Location: "/", "Set-Cookie": hasDb(env) ? clearUserSessionCookie() : clearSessionCookie() } });
     }
 
     // Strip trailing slash for the rest (but keep "/").
@@ -102,10 +112,11 @@ export default {
     if (refsMatch) {
       const repoName = sanitizeRepo(refsMatch[1].replace(/^\/+/, ""));
       return guard(request, env, async () => {
-        requireGitAuth(request, env);
+        await requireGitAuth(request, env);
         const store = await resolveBackend(env, repoName);
         if (!store) return notFound("repository not registered (configure it in /admin)");
         const repo = new Repo(repoName, store);
+        repo.db = env.DB ?? null;
         const refs = new RefStore(repoName, store);
         const service = url.searchParams.get("service") || "";
         if (service === "git-upload-pack") {
@@ -125,10 +136,11 @@ export default {
     if (upMatch) {
       const repoName = sanitizeRepo(upMatch[1].replace(/^\/+/, ""));
       return guard(request, env, async () => {
-        requireGitAuth(request, env);
+        await requireGitAuth(request, env);
         const store = await resolveBackend(env, repoName);
         if (!store) return notFound("repository not registered");
         const repo = new Repo(repoName, store);
+        repo.db = env.DB ?? null;
         const refs = new RefStore(repoName, store);
         const body = request.body as ReadableStream<Uint8Array>;
         const result = isV2(request.headers.get("Git-Protocol"))
@@ -142,12 +154,13 @@ export default {
     if (rpMatch) {
       const repoName = sanitizeRepo(rpMatch[1].replace(/^\/+/, ""));
       return guard(request, env, async () => {
-        requireGitAuth(request, env);
+        await requireGitAuth(request, env);
         const store = await resolveBackend(env, repoName);
         if (!store) return notFound("repository not registered");
         const repo = new Repo(repoName, store);
+        repo.db = env.DB ?? null;
         const refs = new RefStore(repoName, store);
-        const result = await handleReceivePack(repo, refs, request.body as ReadableStream<Uint8Array>);
+        const result = await handleReceivePack(repo, refs, request.body as ReadableStream<Uint8Array>, { db: env.DB, queue: env.PACK_INDEX_QUEUE, ctx });
         return gitResponse(result.contentType, result.body);
       });
     }
@@ -164,6 +177,7 @@ export default {
         const pathParts = treeMatch[3] ? treeMatch[3].split("/").map(decodeURIComponent).filter(Boolean) : [];
         const ctx = await uiContext(request, env, url);
         const repo = new Repo(repoName, store);
+        repo.db = env.DB ?? null;
         const refs = new RefStore(repoName, store);
         let body: string;
         try {
@@ -171,7 +185,7 @@ export default {
         } catch (e) {
           body = `<div class="error">${escapeHtmlForUi(errMsg(e))}</div>`;
         }
-        return html(renderPage({ title: `${repoName} · git-workers`, currentRepo: repoName, baseUrl, isAuthenticated: ctx.isAuthed, authTokenConfigured: ctx.hasToken, isAdmin: isAdminAuthed(request, env), lang: ctx.lang, theme: ctx.theme, bodyInner: body }));
+        return html(renderPage({ title: `${repoName} · git-workers`, currentRepo: repoName, baseUrl, isAuthenticated: ctx.isAuthed, authTokenConfigured: ctx.hasToken, isAdmin: await isAdminAuthed(request, env), lang: ctx.lang, theme: ctx.theme, bodyInner: body }));
       });
     }
 
@@ -179,12 +193,13 @@ export default {
     if (rawMatch) {
       const repoName = sanitizeRepo(rawMatch[1]);
       return guard(request, env, async () => {
-        requireGitAuth(request, env);
+        await requireGitAuth(request, env);
         const store = await resolveBackend(env, repoName);
         if (!store) return notFound("repository not registered");
         const rev = decodeURIComponent(rawMatch[2]);
         const pathParts = rawMatch[3] ? rawMatch[3].split("/").map(decodeURIComponent).filter(Boolean) : [];
         const repo = new Repo(repoName, store);
+        repo.db = env.DB ?? null;
         const refs = new RefStore(repoName, store);
         const result = await serveRaw(repo, refs, rev, pathParts);
         if (!result) return new Response("Not found\n", { status: 404 });
@@ -201,6 +216,7 @@ export default {
         if (!store) return notFound("repository not registered");
         const ctx = await uiContext(request, env, url);
         const repo = new Repo(repoName, store);
+        repo.db = env.DB ?? null;
         const refs = new RefStore(repoName, store);
         let body: string;
         try {
@@ -208,13 +224,39 @@ export default {
         } catch (e) {
           body = `<div class="error">${escapeHtmlForUi(errMsg(e))}</div>`;
         }
-        return html(renderPage({ title: `${repoName} · git-workers`, currentRepo: repoName, baseUrl, isAuthenticated: ctx.isAuthed, authTokenConfigured: ctx.hasToken, isAdmin: isAdminAuthed(request, env), lang: ctx.lang, theme: ctx.theme, bodyInner: body }));
+        return html(renderPage({ title: `${repoName} · git-workers`, currentRepo: repoName, baseUrl, isAuthenticated: ctx.isAuthed, authTokenConfigured: ctx.hasToken, isAdmin: await isAdminAuthed(request, env), lang: ctx.lang, theme: ctx.theme, bodyInner: body }));
       });
     }
 
     return new Response("Not Found\n", { status: 404 });
   },
-} satisfies ExportedHandler<Env>;
+
+  async queue(batch: MessageBatch<PackIndexMessage>, env: Env): Promise<void> {
+    for (const msg of batch.messages) {
+      try {
+        if (!hasDb(env)) {
+          msg.ack();
+          continue;
+        }
+        await initDb(env.DB);
+        const store = await resolveBackend(env, msg.body.repo);
+        if (!store) {
+          msg.ack();
+          continue;
+        }
+        const repo = new Repo(msg.body.repo, store);
+        repo.db = env.DB ?? null;
+        const status = await processPackIndexMessage(env.DB, repo, msg.body);
+        if (status === "more" && env.PACK_INDEX_QUEUE) {
+          await env.PACK_INDEX_QUEUE.send(msg.body, { contentType: "json", delaySeconds: 1 });
+        }
+        msg.ack();
+      } catch {
+        msg.retry({ delaySeconds: Math.min(60 * (msg.attempts + 1), 600) });
+      }
+    }
+  },
+} satisfies ExportedHandler<Env, PackIndexMessage>;
 
 // ---------------------------------------------------------------------------
 // Guards + helpers
@@ -231,7 +273,7 @@ async function guard(request: Request, env: Env, fn: () => Promise<Response>): P
       return new Response(redirect("/login"), { status: 302, headers: { Location: "/login" } });
     }
     if (e instanceof Unauthorized) {
-      return new Response("Unauthorized\n", { status: 401, headers: { "WWW-Authenticate": "Bearer" } });
+      return new Response("Unauthorized\n", { status: 401, headers: { "WWW-Authenticate": 'Basic realm="git-workers"' } });
     }
     return new Response(`git-workers error: ${errMsg(e)}\n`, { status: 500 });
   }
@@ -254,13 +296,14 @@ async function uiContext(request: Request, env: Env, url: URL): Promise<UiContex
   } else {
     store = createBackend(env);
   }
+  const user = await userFromSession(request, env);
   return {
     baseUrl: "",
     store,
     prefix: env.STORAGE_PREFIX?.replace(/^\/|\/$/g, "") ?? "",
     workerOrigin: url.origin,
-    isAuthed: isUiAuthed(request, expected),
-    hasToken: !!env.AUTH_TOKEN,
+    isAuthed: hasDb(env) ? !!user : isUiAuthed(request, expected),
+    hasToken: hasDb(env) ? true : !!env.AUTH_TOKEN,
     lang: detectLang(request.headers.get("Cookie")),
     theme: detectTheme(request.headers.get("Cookie")),
     hasDb: hasDb(env),
@@ -269,6 +312,10 @@ async function uiContext(request: Request, env: Env, url: URL): Promise<UiContex
 }
 
 async function requireUiAuth(request: Request, env: Env): Promise<void> {
+  if (hasDb(env)) {
+    if (await userFromSession(request, env)) return;
+    throw new RedirectLogin();
+  }
   if (!env.AUTH_TOKEN) return; // open UI
   const expected = await sessionForToken(env.AUTH_TOKEN);
   if (!isUiAuthed(request, expected)) {
@@ -276,21 +323,25 @@ async function requireUiAuth(request: Request, env: Env): Promise<void> {
   }
 }
 
-function isAdminAuthed(request: Request, env: Env): boolean {
-  if (!env.ADMIN_PASSWORD) return false;
+async function isAdminAuthed(request: Request, env: Env): Promise<boolean> {
   const cookie = request.headers.get("Cookie") || "";
   for (const part of cookie.split(";")) {
     const eq = part.indexOf("=");
     if (eq > 0 && part.slice(0, eq).trim() === ADMIN_COOKIE) {
-      if (part.slice(eq + 1).trim() === adminSessionValue(env)) return true;
+      if (env.ADMIN_PASSWORD && part.slice(eq + 1).trim() === await adminSessionValue(env)) return true;
     }
   }
-  return false;
+  const user = await userFromSession(request, env);
+  return user?.role === "admin";
 }
 
 class RedirectLogin extends Error {}
 
-function requireGitAuth(request: Request, env: Env): void {
+async function requireGitAuth(request: Request, env: Env): Promise<void> {
+  if (hasDb(env)) {
+    if (await gitBasicUser(request, env)) return;
+    throw new Unauthorized();
+  }
   if (!env.AUTH_TOKEN) return;
   const header = request.headers.get("Authorization") || "";
   const m = header.match(/^Bearer\s+(.+)$/i);
@@ -303,13 +354,31 @@ class Unauthorized extends Error {}
 
 async function handleLogin(request: Request, env: Env): Promise<Response> {
   const form = await request.formData();
-  const token = String(form.get("token") || "").trim();
   const ll = detectLang(request.headers.get("Cookie"));
+  if (hasDb(env)) {
+    const user = await authenticateUser(env, String(form.get("username") || ""), String(form.get("password") || ""));
+    if (user) {
+      return new Response(redirect("/"), { status: 302, headers: { Location: "/", "Set-Cookie": await sessionCookieForUser(env, user) } });
+    }
+    return new Response(renderLoginPage("", true, ll, { userMode: true, allowRegister: await registrationAllowed(env) }), { status: 401, headers: { "Content-Type": "text/html; charset=utf-8" } });
+  }
+  const token = String(form.get("token") || "").trim();
   if (env.AUTH_TOKEN && token === env.AUTH_TOKEN) {
     const sess = await sessionForToken(env.AUTH_TOKEN);
     return new Response(redirect("/"), { status: 302, headers: { Location: "/", "Set-Cookie": setSessionCookie(sess) } });
   }
   return new Response(renderLoginPage("", true, ll), { status: 401, headers: { "Content-Type": "text/html; charset=utf-8" } });
+}
+
+async function handleRegister(request: Request, env: Env): Promise<Response> {
+  const form = await request.formData();
+  const ll = detectLang(request.headers.get("Cookie"));
+  try {
+    const user = await registerUser(env, String(form.get("username") || ""), String(form.get("password") || ""));
+    return new Response(redirect("/"), { status: 302, headers: { Location: "/", "Set-Cookie": await sessionCookieForUser(env, user) } });
+  } catch (e) {
+    return new Response(renderRegisterPage("", errMsg(e), ll), { status: 400, headers: { "Content-Type": "text/html; charset=utf-8" } });
+  }
 }
 
 function sanitizeRepo(name: string): string {
@@ -342,10 +411,10 @@ function redirect(loc: string): string {
   return `<a href="${loc}">Redirect</a>`;
 }
 
-export function adminSessionValue(env: Env): string {
-  // admin session = sha256(ADMIN_PASSWORD) so it's verifiable without storage
-  // (computed async in admin.ts; here we return a marker the admin module checks)
-  return env.ADMIN_PASSWORD ?? "";
+export async function adminSessionValue(env: Env): Promise<string> {
+  if (!env.ADMIN_PASSWORD) return "";
+  const h = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(env.ADMIN_PASSWORD));
+  return [...new Uint8Array(h)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 function escapeHtmlForUi(s: string): string {
